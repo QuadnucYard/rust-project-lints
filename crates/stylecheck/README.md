@@ -6,7 +6,10 @@ file format. Run it from the tree root; every report includes the offending
 line, one neighboring line on either side, and rule-specific observed detail.
 The crate is also a library: `check_tree` performs the whole check for an
 arbitrary root, and the command only selects that root (the optional first
-argument, else the current directory).
+argument, else the current directory) and the config (`--config FILE`
+overrides the `stylecheck.toml` at the scanned root and must name an existing
+file; `--help` and `--version` work as usual, and `cargo stylecheck …` behaves
+like the direct invocation).
 
 ## Rule registry
 

@@ -63,7 +63,22 @@ pub enum CheckError {
 /// Every violation is returned sorted by path, line and rule; an empty vector
 /// means the tree passes.
 pub fn check_tree(root: &Path) -> Result<Vec<Violation>, CheckError> {
-    let config = load_config(root)?;
+    check_tree_with_config(root, None)
+}
+
+/// [`check_tree`] with the style config file selected explicitly:
+/// `Some(path)` reads exactly that file — a missing one is a hard error, so a
+/// mistyped override never silently widens the check to the built-in
+/// defaults — while `None` keeps the optional [`CONFIG_FILE`] at the scanned
+/// root.
+pub fn check_tree_with_config(
+    root: &Path,
+    config_path: Option<&Path>,
+) -> Result<Vec<Violation>, CheckError> {
+    let config = match config_path {
+        Some(path) => load_explicit_config(path)?,
+        None => load_config(root)?,
+    };
     let mut files = BTreeSet::new();
     for scan_path in config.scan_paths() {
         collect_files(&root.join(scan_path), &mut files)?;
@@ -134,6 +149,20 @@ fn load_config(root: &Path) -> Result<StyleConfig, CheckError> {
             source,
         }),
     }
+}
+
+/// Load a style config the caller selected by path. Unlike the root default,
+/// a missing file is a hard error: an explicitly selected config must not
+/// silently fall back to the built-in defaults.
+fn load_explicit_config(path: &Path) -> Result<StyleConfig, CheckError> {
+    let text = fs::read_to_string(path).map_err(|source| CheckError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    StyleConfig::from_toml(&text).map_err(|error| CheckError::Config {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })
 }
 
 /// Whether a directory is outside the walk: Cargo's build directory and hidden
@@ -303,6 +332,44 @@ paths = ["crates/game/"]
                     && violation.path == "notes/data.toml"),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn an_explicit_config_file_replaces_the_root_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        // The root config narrows the walk to `narrowed/`; the explicitly
+        // selected one selects `elsewhere/` instead, so the selected file
+        // must win and the root config only names extra scan trees.
+        write(root, "stylecheck.toml", "scan-paths = [\"narrowed\"]\n");
+        write(root, "custom.toml", "scan-paths = [\"elsewhere\"]\n");
+        let violating = "use std::fmt;\n\nmod parser;\n";
+        write(root, "elsewhere/src/lib.rs", violating);
+        write(root, "narrowed/src/lib.rs", violating);
+
+        let found =
+            check_tree_with_config(root, Some(&root.join("custom.toml"))).expect("the tree checks");
+        assert!(
+            found
+                .iter()
+                .any(|violation| violation.rule == Rule::ModBeforeUse
+                    && violation.path == "elsewhere/src/lib.rs"),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|violation| !violation.path.starts_with("narrowed/")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_config_file_must_exist() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let error = check_tree_with_config(dir.path(), Some(Path::new("missing.toml")))
+            .expect_err("the missing config is a hard error");
+        assert!(matches!(error, CheckError::Read { .. }), "{error:?}");
     }
 
     #[test]
