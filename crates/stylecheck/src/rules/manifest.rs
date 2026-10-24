@@ -227,11 +227,20 @@ fn check_trailing_newline(path: &str, text: &str) -> Vec<Violation> {
     let Some(last_content) = text.rfind(|ch: char| !ch.is_whitespace()) else {
         return Vec::new();
     };
-    let tail = &text[last_content + 1..];
-    if tail == "\n" {
+    // `rfind` returns the start of a character, so advance by its full UTF-8
+    // width: a multibyte final character must not be split at a byte boundary.
+    let content_end = last_content
+        + text[last_content..]
+            .chars()
+            .next()
+            .map_or(0, char::len_utf8);
+    let tail = &text[content_end..];
+    // Exactly one newline closes the content line. Whitespace before that
+    // newline belongs to the content line, not to a new blank line.
+    if tail.ends_with('\n') && tail.matches('\n').count() == 1 {
         return Vec::new();
     }
-    if tail.is_empty() {
+    if !tail.contains('\n') {
         let line = text.matches('\n').count() + 1;
         return vec![Violation::new(
             path,
@@ -240,8 +249,9 @@ fn check_trailing_newline(path: &str, text: &str) -> Vec<Violation> {
             text,
         )];
     }
-    // The extra bytes start a line after the last content line.
-    let line = line_of(text, last_content + 1) + 1;
+    // A blank line follows the content line; report the first one. The stored
+    // excerpt includes it, so the locus never points past the end of the file.
+    let line = line_of(text, content_end) + 1;
     vec![Violation::new(
         path,
         line,
@@ -931,6 +941,39 @@ serde.workspace = true
     fn manifest_without_a_final_newline_is_reported() {
         let text = "[package]\nname = \"probe\"";
         let found = crate_manifest(text);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, Rule::TomlMissingTrailingNewline);
+        assert_eq!(found[0].line, 2);
+    }
+
+    #[test]
+    fn multibyte_final_content_is_not_split_at_a_byte_boundary() {
+        // The final non-whitespace character is `é` (two bytes), so the tail
+        // slice must start after the whole character, not in the middle.
+        for text in ["# café\n", "# café   \n"] {
+            let found = check_toml_file("data.toml", text);
+            assert!(found.is_empty(), "{text:?}: {found:?}");
+        }
+
+        let found = check_toml_file("data.toml", "# café");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, Rule::TomlMissingTrailingNewline);
+        assert_eq!(found[0].line, 1);
+
+        let found = check_toml_file("data.toml", "# café\n\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, Rule::TomlTrailingBlankLine);
+        assert_eq!(found[0].line, 2);
+    }
+
+    #[test]
+    fn trailing_spaces_do_not_make_a_blank_line() {
+        // Spaces on the last content line are not a separate blank line.
+        let found = check_toml_file("Cargo.toml", "[package]\nname = \"probe\"   \n");
+        assert!(found.is_empty(), "{found:?}");
+
+        // Without the closing newline the file is missing T3, not a blank line.
+        let found = check_toml_file("Cargo.toml", "[package]\nname = \"probe\"   ");
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].rule, Rule::TomlMissingTrailingNewline);
         assert_eq!(found[0].line, 2);

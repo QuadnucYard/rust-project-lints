@@ -112,10 +112,11 @@ know.
   first carriage return, so a CRLF file does not repeat the report on every
   line. A manifest that also fails to parse reports both findings.
 - **`T2` `trailing-blank-line`.** A TOML file must not end with a trailing blank
-  line after its last content line.
+  line after its last content line. Trailing spaces on the last content line are
+  not a blank line.
 - **`T3` `missing-trailing-newline`.** A TOML file must carry the final newline
-  that closes its last line. A CRLF file is left to `T1` so it is not reported
-  twice.
+  that closes its last line, including a file that ends directly after trailing
+  spaces. A CRLF file is left to `T1` so it is not reported twice.
 
 The walk covers the TOML files at the scanned root plus every Rust source and
 TOML file below each configured `scan-paths` entry, so one configuration
