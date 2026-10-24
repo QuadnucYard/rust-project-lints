@@ -58,11 +58,12 @@ pub struct Violation {
     pub path: String,
     /// 1-based line number of the offending line.
     pub line: usize,
+    /// The violated standing rule. This sorts before `columns` so the
+    /// registry's rule order decides report order on a shared line.
+    pub rule: Rule,
     /// The offending columns, when the rule knows them; the report underlines
     /// exactly these, the whole line otherwise.
     pub columns: Option<ColumnSpan>,
-    /// The violated standing rule.
-    pub rule: Rule,
     /// The severity the report renders and the exit decision reads: the
     /// rule's default level, unless the style config's `[levels]` section
     /// overrides it.
@@ -103,5 +104,25 @@ impl Violation {
             detail: Some(detail.into()),
             ..Self::new(path, line, rule, text)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn violations_sort_by_rule_before_columns() {
+        let text = "line\n";
+        let mut narrowed = Violation::new("src/lib.rs", 1, Rule::QualifiedName, text);
+        narrowed.columns = Some(ColumnSpan { start: 0, end: 1 });
+        let plain = Violation::new("src/lib.rs", 1, Rule::ModBeforeUse, text);
+
+        // `QualifiedName` is S4 and `ModBeforeUse` is S5. The rule order must
+        // win even though only S4 carries explicit columns.
+        let mut found = vec![plain, narrowed];
+        found.sort();
+        assert_eq!(found[0].rule, Rule::QualifiedName, "{found:?}");
+        assert_eq!(found[1].rule, Rule::ModBeforeUse, "{found:?}");
     }
 }
