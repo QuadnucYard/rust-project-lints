@@ -34,10 +34,12 @@ know.
 ### Source layout — S
 
 - **`S1` `module-doc-spacing`.** A contiguous module-level `//!` block is
-  followed by exactly one blank line before the next item. Paths listed in the
-  top-level `exempt-paths` array are skipped, which is how standalone trybuild
-  programs under `tests/ui/` stay exempt: their doc comments introduce the
-  failing source directly.
+  followed by exactly one blank line before the next item. Inner attributes
+  (`#![doc = …]`, `#![allow(…)]`, …) and plain `//` comments under the docs
+  belong to the same module header and do not count as that item. Paths
+  listed in the top-level `exempt-paths` array are skipped, which is how
+  standalone trybuild programs under `tests/ui/` stay exempt: their doc
+  comments introduce the failing source directly.
 - **`S2` `test-mod-attribute-spacing`.** `#[cfg(test)]` is immediately followed
   by its `mod` declaration.
 - **`S3` `test-mod-body-spacing`.** The unit-test module body opens without a

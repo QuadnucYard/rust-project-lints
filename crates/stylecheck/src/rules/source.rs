@@ -1,5 +1,9 @@
 //! Source-layout rules.
 
+use std::collections::BTreeSet;
+
+use proc_macro2::{TokenStream, TokenTree};
+
 use crate::{Rule, StyleConfig, Violation, rules::qualified::check_qualified_names};
 
 /// Check one Rust source file against the source layout rules. A path the
@@ -17,14 +21,30 @@ pub fn check_rust_source(path: &str, text: &str, config: &StyleConfig) -> Vec<Vi
     found
 }
 
-/// Rule `module-doc-spacing`: after the last `//!` line of a doc block, the
-/// next item must start exactly one line below it.
+/// Rule `module-doc-spacing`: a module doc block — its `//!` lines plus the
+/// inner attributes (`#![doc = …]` among them) and plain `//` comments that
+/// follow them — must be followed by exactly one blank line before the next
+/// item.
 fn check_module_doc_spacing(path: &str, text: &str) -> Vec<Violation> {
+    // Parse the source for attribute extents so a multi-line inner attribute
+    // joins the header as a whole. A file without inner attributes needs no
+    // token pass, and an untokenizable file keeps the line-based fallback.
+    let attribute_lines = if text.contains("#![") {
+        inner_attribute_lines(text)
+    } else {
+        BTreeSet::new()
+    };
     let mut found = Vec::new();
     let mut last_doc: Option<usize> = None;
     for (index, line) in text.lines().enumerate() {
         let line_no = index + 1;
-        if line.trim_start().starts_with("//!") {
+        let trimmed = line.trim_start();
+        // A `//!` line opens the block; any other header line only extends a
+        // block that is already open.
+        if trimmed.starts_with("//!")
+            || (last_doc.is_some()
+                && (is_header_line(trimmed) || attribute_lines.contains(&line_no)))
+        {
             last_doc = Some(line_no);
         } else if !line.trim().is_empty()
             && let Some(doc) = last_doc.take()
@@ -34,6 +54,44 @@ fn check_module_doc_spacing(path: &str, text: &str) -> Vec<Violation> {
         }
     }
     found
+}
+
+/// A line that belongs to the module header rather than to the items the
+/// blank line separates: an inner attribute (`#![doc = …]` among them) or a
+/// plain `//` comment. A `///` doc comment is excluded — it documents the
+/// item below it, so it starts that item.
+fn is_header_line(trimmed: &str) -> bool {
+    trimmed.starts_with("#![") || (trimmed.starts_with("//") && !trimmed.starts_with("///"))
+}
+
+/// Every source line covered by a top-level inner attribute (`#![…]`). The
+/// token stream knows where the attribute's bracket group ends, including
+/// strings and nested brackets, so each continuation line can join the module
+/// header instead of looking like the first item.
+fn inner_attribute_lines(text: &str) -> BTreeSet<usize> {
+    let Ok(stream) = text.parse::<TokenStream>() else {
+        return BTreeSet::new();
+    };
+    let mut tokens = stream.into_iter().peekable();
+    let mut lines = BTreeSet::new();
+    while let Some(token) = tokens.next() {
+        let TokenTree::Punct(hash) = token else {
+            continue;
+        };
+        if hash.as_char() != '#'
+            || !matches!(tokens.peek(), Some(TokenTree::Punct(bang)) if bang.as_char() == '!')
+        {
+            continue;
+        }
+        tokens.next();
+        let Some(TokenTree::Group(group)) = tokens.next() else {
+            continue;
+        };
+        let start = group.span_open().start().line;
+        let end = group.span_close().end().line;
+        lines.extend(start..=end);
+    }
+    lines
 }
 
 /// Rule `test-mod-attribute-spacing`: a `#[cfg(test)]` attribute is glued to
@@ -178,6 +236,64 @@ mod tests {
         for (text, line) in [
             ("//! Module docs.\nuse std::fmt;\n", 2),
             ("//! Module docs.\n\n\nuse std::fmt;\n", 4),
+        ] {
+            let found = check("src/lib.rs", text);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].rule, Rule::ModuleDocSpacing);
+            assert_eq!(found[0].line, line, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn inner_attributes_join_the_module_doc_block() {
+        for clean in [
+            "//! Docs.\n#![doc = include_str!(\"../README.md\")]\n\nuse std::fmt;\n",
+            "//! Docs.\n#![allow(dead_code)]\n#![warn(missing_docs)]\n\nuse std::fmt;\n",
+            "//! Docs.\n#![allow(\n    dead_code,\n)]\n\nuse std::fmt;\n",
+            "//! Docs.\n#![doc = r#\"\nSome text\n\"#]\n\nuse std::fmt;\n",
+            "//! Docs.\n\n#![allow(dead_code)]\n\nuse std::fmt;\n",
+            // Without a `//!` block an attribute opens nothing and is not checked.
+            "#![doc = include_str!(\"../README.md\")]\n#![warn(missing_docs)]\n\nuse std::fmt;\n",
+            "#![allow(dead_code)]\nuse std::fmt;\n",
+        ] {
+            assert!(check("src/lib.rs", clean).is_empty(), "{clean:?}");
+        }
+        // The item after the header still needs its blank line.
+        for (text, line) in [
+            (
+                "//! Docs.\n#![doc = include_str!(\"../README.md\")]\nuse std::fmt;\n",
+                3,
+            ),
+            ("//! Docs.\n#![allow(dead_code)]\n\n\nuse std::fmt;\n", 5),
+            (
+                "//! Docs.\n#![allow(\n    dead_code,\n)]\nuse std::fmt;\n",
+                5,
+            ),
+        ] {
+            let found = check("src/lib.rs", text);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].rule, Rule::ModuleDocSpacing);
+            assert_eq!(found[0].line, line, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn plain_comments_join_the_module_doc_block() {
+        for clean in [
+            "//! Docs.\n// A note.\n\nuse std::fmt;\n",
+            "//! Docs.\n// One note.\n// Another note.\n\nuse std::fmt;\n",
+            "//! Docs.\n#![allow(dead_code)]\n// A note.\n\nuse std::fmt;\n",
+            // A `///` doc comment stays with the item below it.
+            "//! Docs.\n\n/// Item docs.\npub fn f() {}\n",
+            "// Without `//!` docs a comment opens no block.\nuse std::fmt;\n",
+        ] {
+            assert!(check("src/lib.rs", clean).is_empty(), "{clean:?}");
+        }
+        // The item after the header still needs its blank line.
+        for (text, line) in [
+            ("//! Docs.\n// A note.\nuse std::fmt;\n", 3),
+            ("//! Docs.\n// A note.\n\n\nuse std::fmt;\n", 5),
+            ("//! Docs.\n/// Item docs.\npub fn f() {}\n", 2),
         ] {
             let found = check("src/lib.rs", text);
             assert_eq!(found.len(), 1, "{found:?}");
