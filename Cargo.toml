@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.dependencies]
+proc-macro2 = "1"
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3.26"
+thiserror = "2.0"
+toml = "1.1"
+toml_edit = "0.25"
+
+[workspace.lints.rust]
+warnings = "warn"
+missing_docs = "warn"
+redundant_imports = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+absolute_paths = "warn"
+iter_over_hash_type = "warn"

@@ -1,0 +1,11 @@
+# rustfmt configuration; `cargo fmt --all --check` in CI enforces this.
+# newline_style matches the style checker's line-endings rule: LF everywhere.
+edition = "2024"
+style_edition = "2024"
+
+newline_style = "Unix"
+max_width = 100
+
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+reorder_imports = true

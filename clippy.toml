@@ -1,0 +1,2 @@
+# Clippy configuration; msrv mirrors each crate's rust-version.
+msrv = "1.98"

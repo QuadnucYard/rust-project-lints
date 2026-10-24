@@ -1,0 +1,23 @@
+# Whitelist: nothing is tracked unless explicitly allowed below.
+*
+!*/
+
+# Repository files
+!.gitattributes
+!.gitignore
+!README.md
+!AGENTS.md
+!/.github/**
+!Cargo.lock
+!Cargo.toml
+!clippy.toml
+!rustfmt.toml
+!justfile
+!stylecheck.toml
+!_typos.toml
+
+# Workspace crates
+!crates/**
+
+# Generated / local state (re-ignored after the whitelist above)
+/target/

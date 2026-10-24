@@ -1,0 +1,18 @@
+# Spell-check configuration for `typos` (https://github.com/crate-ci/typos).
+# The walker honors .gitignore, so untracked working notes and the copied
+# reference material are already out of scope; the excludes below only name
+# directories that can appear in a checkout but never contain authored text.
+
+[default]
+locale = "en-us"
+
+# Words that are correct as written but that the en-us dictionary would
+[default.extend-words]
+ser = "ser"
+stylecheck = "stylecheck"
+
+[files]
+extend-exclude = [
+  "target",
+  "vendor",
+]
