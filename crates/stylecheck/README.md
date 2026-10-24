@@ -39,7 +39,8 @@ names the root dependency aspects and gives each the path prefixes that assign
 a workspace member to it. A known section rejects unknown keys — a misspelled
 option is a hard config error — while an unknown top-level section is
 tolerated, so a newer config can carry a section an older checker does not
-know.
+know. An unknown top-level scalar or array is not a section and is rejected;
+an empty `exempt-paths` entry is rejected because it would exempt every file.
 
 ### Source layout — S
 

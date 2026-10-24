@@ -58,6 +58,11 @@ struct StyleFile {
     qualified: QualifiedTable,
     #[serde(rename = "dependency-group-order", default)]
     dependency_group_order: DependencyGroupOrderTable,
+    /// Top-level keys the schema does not know. A table (or a non-empty array
+    /// of tables) is a future rule section and stays tolerated; any other
+    /// value is a misspelled option and must fail loudly.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
 }
 
 /// The `[qualified-name]` section: canonical spellings the `qualified-name`
@@ -85,6 +90,30 @@ struct DependencyGroupOrderTable {
 struct AspectTable {
     name: String,
     paths: Vec<String>,
+}
+
+/// Reject an unknown top-level key unless it is shaped like a future rule
+/// section: a table or a non-empty array of tables. A scalar or a plain array
+/// is a misspelled option — silently ignoring it would change the check
+/// without telling the user.
+fn reject_unknown_options(unknown: &BTreeMap<String, toml::Value>) -> Result<(), ConfigError> {
+    for (key, value) in unknown {
+        let is_section = match value {
+            toml::Value::Table(_) => true,
+            toml::Value::Array(items) => {
+                !items.is_empty() && items.iter().all(toml::Value::is_table)
+            }
+            _ => false,
+        };
+        if !is_section {
+            return Err(ConfigError::InvalidConfig {
+                detail: format!(
+                    "unknown top-level option `{key}`; expected one of the documented options or a rule section"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Resolve one `[levels]` entry. The key must name a known rule and the value
@@ -205,6 +234,12 @@ impl StyleConfig {
             toml::from_str(config_text).map_err(|error| ConfigError::InvalidConfig {
                 detail: error.to_string(),
             })?;
+        reject_unknown_options(&file.unknown)?;
+        if file.exempt_paths.iter().any(String::is_empty) {
+            return Err(ConfigError::InvalidConfig {
+                detail: "`exempt-paths` must not contain an empty entry".to_owned(),
+            });
+        }
         let qualified =
             QualifiedNamePolicy::from_lists(file.qualified.whitelist, file.qualified.blacklist)?;
         let levels = file
@@ -366,5 +401,33 @@ paths = ["crates/beta/", "crates/shared/"]
         ] {
             assert!(StyleConfig::from_toml(text).is_err(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn top_level_option_typos_are_rejected_but_sections_are_tolerated() {
+        // A misspelled scalar or array option must not silently fall back to
+        // its default.
+        for text in [
+            "scan-path = [\"crates\"]\n",
+            "exempt-path = [\"tests/ui/\"]\n",
+            "unknown = 1\n",
+            "unknown = [\"value\"]\n",
+        ] {
+            assert!(StyleConfig::from_toml(text).is_err(), "{text:?}");
+        }
+        // A future rule's section remains accepted in both table spellings.
+        for text in [
+            "[future-rule]\noption = true\n",
+            "[[future-rule]]\noption = true\n",
+        ] {
+            assert!(StyleConfig::from_toml(text).is_ok(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn empty_exempt_path_is_rejected() {
+        // `path.contains("")` is always true, so an empty fragment would
+        // silently exempt every source file from the path-sensitive rules.
+        assert!(StyleConfig::from_toml("exempt-paths = [\"\"]\n").is_err());
     }
 }
