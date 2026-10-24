@@ -1,0 +1,25 @@
+[package]
+name = "cargo-stylecheck"
+description = "Layout style checker for Rust sources and Cargo/TOML manifests"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[lib]
+name = "stylecheck"
+
+[dependencies]
+# span-locations is NOT in proc-macro2's default features; the `qualified-name`
+# token scan needs 1-based line numbers from fallback spans in this plain library.
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
