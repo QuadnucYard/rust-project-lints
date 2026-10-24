@@ -20,6 +20,6 @@ pub mod rules;
 
 pub use check::{CONFIG_FILE, CheckError, ROOT_MANIFEST, check_tree, check_tree_with_config};
 pub use config::{ConfigError, StyleConfig};
-pub use diagnostic::{ContextLine, SourceContext, Violation};
+pub use diagnostic::{ColumnSpan, ContextLine, SourceContext, Violation};
 pub use report::{render_reports, write_reports};
 pub use rules::{Rule, RuleGroup};

@@ -4,7 +4,8 @@
 layout rules it enforces: Rust source layout, Cargo manifest layout and TOML
 file format. Run it from the tree root; reports go to the standard error
 stream in `codespan-reporting` style — a `path:line:column` locus, the
-offending line underlined with one neighboring line on either side, and
+offending span underlined (the whole line, or exactly the violating columns
+when the rule knows them) with one neighboring line on either side, and
 rule-specific observed detail as a note. The crate is also a library:
 `check_tree` performs the whole check for an arbitrary root, and the command
 only selects that root (the optional first argument, else the current

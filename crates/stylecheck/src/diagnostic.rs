@@ -41,6 +41,16 @@ impl SourceContext {
     }
 }
 
+/// The offending columns of one line: 0-based, `start` inclusive, `end`
+/// exclusive, counted in characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ColumnSpan {
+    /// The first offending character, 0-based within the line.
+    pub start: usize,
+    /// One past the last offending character, 0-based within the line.
+    pub end: usize,
+}
+
 /// One style violation with its source location and repair context.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Violation {
@@ -48,6 +58,9 @@ pub struct Violation {
     pub path: String,
     /// 1-based line number of the offending line.
     pub line: usize,
+    /// The offending columns, when the rule knows them; the report underlines
+    /// exactly these, the whole line otherwise.
+    pub columns: Option<ColumnSpan>,
     /// The violated standing rule.
     pub rule: Rule,
     /// Extra evidence such as the observed and expected dependency groups.
@@ -61,10 +74,17 @@ impl Violation {
         Self {
             path: path.to_owned(),
             line,
+            columns: None,
             rule,
             detail: None,
             context: SourceContext::around(text, line),
         }
+    }
+
+    /// Narrow the report from the whole offending line to these columns.
+    pub(crate) fn narrowed_to(mut self, columns: ColumnSpan) -> Self {
+        self.columns = Some(columns);
+        self
     }
 
     pub(crate) fn with_detail(

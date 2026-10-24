@@ -16,9 +16,9 @@ use std::{
     str::FromStr,
 };
 
-use proc_macro2::{Spacing, TokenStream, TokenTree};
+use proc_macro2::{LineColumn, Spacing, TokenStream, TokenTree};
 
-use crate::{Rule, Violation, config::ConfigError};
+use crate::{ColumnSpan, Rule, Violation, config::ConfigError};
 
 /// How a pattern matches a candidate path spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,7 +275,9 @@ fn use_item_end(tokens: &[TokenTree], start: usize) -> usize {
 #[derive(Clone, Debug)]
 struct Segment {
     text: String,
-    line: usize,
+    /// Where the segment starts and ends in the source file.
+    start: LineColumn,
+    end: LineColumn,
 }
 
 /// The path run currently under construction during Pass B.
@@ -315,7 +317,8 @@ fn scan_pairs(
             TokenTree::Ident(ident) => {
                 let segment = Segment {
                     text: ident.to_string(),
-                    line: ident.span().start().line,
+                    start: ident.span().start(),
+                    end: ident.span().end(),
                 };
                 if state.open {
                     state.run.push(segment);
@@ -386,20 +389,27 @@ fn check_pair(
     policy: &QualifiedNamePolicy,
     out: &mut Vec<Violation>,
 ) {
-    let module = &run[index].text;
-    let ty = &run[index + 1].text;
-    if !is_snake(module) || !is_pascal(ty) || is_excluded_segment(module) {
+    let module = &run[index];
+    let ty = &run[index + 1];
+    if !is_snake(&module.text) || !is_pascal(&ty.text) || is_excluded_segment(&module.text) {
         return;
     }
     if allows(policy, run, index) {
         return;
     }
-    out.push(Violation::new(
-        path,
-        run[index].line,
-        Rule::QualifiedName,
-        text,
-    ));
+    let mut violation = Violation::new(path, module.start.line, Rule::QualifiedName, text);
+    // The report underlines the whole spelled path — the first segment's
+    // first character through the type segment's last, the spelling the
+    // whitelist and blacklist match — but only when it sits on one line: a
+    // label spanning lines would reach past the excerpt the report stores,
+    // so a line-split spelling falls back to its line.
+    if run[0].start.line == ty.end.line {
+        violation = violation.narrowed_to(ColumnSpan {
+            start: run[0].start.column,
+            end: ty.end.column,
+        });
+    }
+    out.push(violation);
 }
 
 /// Whether the literal candidate path is permitted: whitelist wins over
@@ -574,6 +584,29 @@ fn main() {
         );
         assert_eq!(found[0].line, 1);
         assert_eq!(found[1].line, 2);
+    }
+
+    #[test]
+    fn reports_carry_the_columns_of_the_spelled_path() {
+        let text = "fn decode() -> registry::DuplicateSchema {}\n";
+        let found = check_qualified_names("src/lib.rs", text, &QualifiedNamePolicy::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        // `registry::DuplicateSchema` starts at character 15 of the line and
+        // ends one past its last character at 40.
+        assert_eq!(found[0].columns, Some(ColumnSpan { start: 15, end: 40 }));
+        // A rooted path is underlined from its first segment: the spelling
+        // the whitelist and blacklist match is `crate::registry::DuplicateSchema`,
+        // characters 8..40.
+        let rooted = "let d = crate::registry::DuplicateSchema;\n";
+        let found = check_qualified_names("src/lib.rs", rooted, &QualifiedNamePolicy::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].columns, Some(ColumnSpan { start: 8, end: 40 }));
+        // A spelling split across lines cannot be one span; it keeps the
+        // whole-line underline.
+        let split = "fn decode() -> registry::\n    DuplicateSchema {}\n";
+        let found = check_qualified_names("src/lib.rs", split, &QualifiedNamePolicy::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].columns, None);
     }
 
     #[test]

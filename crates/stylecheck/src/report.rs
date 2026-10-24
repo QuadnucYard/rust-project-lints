@@ -1,11 +1,12 @@
 //! Rendering violations as human-readable reports with `codespan-reporting`.
 //!
 //! Each violation becomes one rustc-style report: an `error[id name]` header,
-//! the `path:line:column` locus, the offending line underlined with one
-//! unmarked context line on either side supplied by the renderer, plus the
-//! rule-specific observed detail as a note. [`write_reports`] emits to any
-//! colored writer (the command's standard error stream); [`render_reports`]
-//! renders the same reports as plain text for tests.
+//! the `path:line:column` locus, the offending span underlined — the whole
+//! line, narrowed to the violating columns when the rule knows them — with
+//! one unmarked context line on either side supplied by the renderer, plus
+//! the rule-specific observed detail as a note. [`write_reports`] emits to
+//! any colored writer (the command's standard error stream);
+//! [`render_reports`] renders the same reports as plain text for tests.
 
 use core::ops::Range;
 
@@ -15,7 +16,7 @@ use codespan_reporting::{
     term::{self, Config, termcolor::WriteColor},
 };
 
-use crate::diagnostic::Violation;
+use crate::diagnostic::{ColumnSpan, Violation};
 
 /// The rendering configuration shared by both writers: one unmarked context
 /// line on either side of a label, supplied by the renderer itself.
@@ -54,9 +55,10 @@ pub fn render_reports(violations: &[Violation]) -> String {
 }
 
 /// The report of one violation: the rule as the diagnostic code and message,
-/// one primary label over the offending line and the observed detail as a
-/// note. The renderer draws the labeled line and the context lines around it,
-/// so the neighbors need no labels of their own.
+/// one primary label over the offending span — the whole line, narrowed to
+/// its columns when the rule knows them — and the observed detail as a note.
+/// The renderer draws the labeled line and the context lines around it, so
+/// the neighbors need no labels of their own.
 fn violation_diagnostic(violation: &Violation, file: &ExcerptFile<'_>) -> Diagnostic<()> {
     let labels = violation
         .context
@@ -67,7 +69,10 @@ fn violation_diagnostic(violation: &Violation, file: &ExcerptFile<'_>) -> Diagno
             if !line.highlighted {
                 return None;
             }
-            Some(Label::primary((), file.text_range(index)))
+            let range = violation.columns.map_or(file.text_range(index), |columns| {
+                file.column_range(index, columns)
+            });
+            Some(Label::primary((), range))
         })
         .collect();
     let mut diagnostic = Diagnostic::error()
@@ -127,6 +132,16 @@ impl<'a> ExcerptFile<'a> {
             .map_or(self.source.len(), |next| next - 1);
         start..end
     }
+
+    /// The byte range covering `columns` of excerpt line `index`, converting
+    /// the character columns to byte offsets and clamping to the line's text.
+    fn column_range(&self, index: usize, columns: ColumnSpan) -> Range<usize> {
+        let line = self.text_range(index);
+        let text = &self.source[line.clone()];
+        let start = char_offset(text, columns.start);
+        let end = start + char_offset(&text[start..], columns.end.saturating_sub(columns.start));
+        line.start + start..line.start + end
+    }
 }
 
 impl<'a> Files<'a> for ExcerptFile<'a> {
@@ -175,6 +190,14 @@ impl<'a> Files<'a> for ExcerptFile<'a> {
     }
 }
 
+/// The byte offset of the `chars`-th character of `text`, or the text's
+/// length when `chars` reaches past its end.
+fn char_offset(text: &str, chars: usize) -> usize {
+    text.char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(offset, _)| offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +237,10 @@ mod tests {
         assert!(rendered.contains("fn item() {}"), "{rendered}");
         assert!(rendered.contains("let after = 3;"), "{rendered}");
         assert!(rendered.contains("^^^"), "{rendered}");
+        assert!(
+            rendered.contains("1 │ //! docs\n2 │ fn item() {}"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("---"), "{rendered}");
     }
 
@@ -240,6 +267,23 @@ mod tests {
         );
         let rendered = render_reports(&[violation]);
         assert!(rendered.contains("= 1 CRLF line ending"), "{rendered}");
+    }
+
+    #[test]
+    fn known_columns_underline_exactly_the_offending_span() {
+        // The columns name `registry::DuplicateSchema` (characters 15..40 of
+        // line 1), so the carets must skip the 15 leading characters and
+        // cover nothing else on the line.
+        let violation = Violation::new(
+            "src/lib.rs",
+            1,
+            Rule::QualifiedName,
+            "fn decode() -> registry::DuplicateSchema {}\n",
+        )
+        .narrowed_to(ColumnSpan { start: 15, end: 40 });
+        let rendered = render_reports(&[violation]);
+        let expected = format!("  │ {}{}", " ".repeat(15), "^".repeat(25));
+        assert!(rendered.lines().any(|line| line == expected), "{rendered}");
     }
 
     #[test]
