@@ -8,6 +8,7 @@
 use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
+use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
 
 /// Layout style checker for Rust sources and Cargo/TOML manifests.
 #[derive(Debug, Parser)]
@@ -35,17 +36,21 @@ fn main() -> ExitCode {
         },
     };
     match stylecheck::check_tree_with_config(&root, cli.config.as_deref()) {
+        Ok(found) if found.is_empty() => {
+            println!("style check passed");
+            ExitCode::SUCCESS
+        }
         Ok(found) => {
-            if found.is_empty() {
-                println!("style check passed");
-                ExitCode::SUCCESS
-            } else {
-                for violation in &found {
-                    println!("{}", violation.report());
-                }
-                println!("style check failed: {} violation(s)", found.len());
-                ExitCode::from(1)
+            // Reports are diagnostics, so they go to the standard error
+            // stream like rustc's, with color when that stream supports it.
+            let stderr = StandardStream::stderr(ColorChoice::Auto);
+            let mut stderr = stderr.lock();
+            if let Err(error) = stylecheck::write_reports(&mut stderr, &found) {
+                eprintln!("cargo-stylecheck: failed to write the reports: {error}");
+                return ExitCode::from(2);
             }
+            eprintln!("style check failed: {} violation(s)", found.len());
+            ExitCode::from(1)
         }
         Err(error) => {
             eprintln!("cargo-stylecheck: {error}");

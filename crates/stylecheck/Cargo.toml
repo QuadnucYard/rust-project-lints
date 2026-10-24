@@ -11,6 +11,7 @@ name = "stylecheck"
 
 [dependencies]
 clap.workspace = true
+codespan-reporting.workspace = true
 # span-locations is NOT in proc-macro2's default features; the `qualified-name`
 # token scan needs 1-based line numbers from fallback spans in this plain library.
 proc-macro2 = { workspace = true, features = ["span-locations"] }

@@ -2,21 +2,22 @@
 
 `cargo-stylecheck` is the executable and authoritative description of the
 layout rules it enforces: Rust source layout, Cargo manifest layout and TOML
-file format. Run it from the tree root; every report includes the offending
-line, one neighboring line on either side, and rule-specific observed detail.
-The crate is also a library: `check_tree` performs the whole check for an
-arbitrary root, and the command only selects that root (the optional first
-argument, else the current directory) and the config (`--config FILE`
-overrides the `stylecheck.toml` at the scanned root and must name an existing
-file; `--help` and `--version` work as usual, and `cargo stylecheck …` behaves
-like the direct invocation).
+file format. Run it from the tree root; reports go to the standard error
+stream in `codespan-reporting` style — a `path:line:column` locus, the
+offending line underlined with one neighboring line on either side, and
+rule-specific observed detail as a note. The crate is also a library:
+`check_tree` performs the whole check for an arbitrary root, and the command
+only selects that root (the optional first argument, else the current
+directory) and the config (`--config FILE` overrides the `stylecheck.toml` at
+the scanned root and must name an existing file; `--help` and `--version`
+work as usual, and `cargo stylecheck …` behaves like the direct invocation).
 
 ## Rule registry
 
 Rules are grouped by what they inspect. A rule id is its group letter followed
 by the rule's 1-based ordinal inside the group — `S` source layout, `M` Cargo
 manifest layout, `T` TOML file format. Reports print the id with the rule's
-canonical name (`error: …: [S1 module-doc-spacing] …`), and that canonical name
+canonical name (`error[S1 module-doc-spacing]: …`), and that canonical name
 is also the section key of a rule that has options in `stylecheck.toml`, the one
 config for all style options. The top-level `exempt-paths` array of that config
 lists the path fragments the source-layout rules skip. The top-level
