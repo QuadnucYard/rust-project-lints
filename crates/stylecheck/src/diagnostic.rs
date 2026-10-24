@@ -1,6 +1,6 @@
 //! Structured diagnostics shared by every style rule.
 
-use crate::Rule;
+use crate::{Level, Rule};
 
 /// One source line in a diagnostic excerpt.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,6 +63,10 @@ pub struct Violation {
     pub columns: Option<ColumnSpan>,
     /// The violated standing rule.
     pub rule: Rule,
+    /// The severity the report renders and the exit decision reads: the
+    /// rule's default level, unless the style config's `[levels]` section
+    /// overrides it.
+    pub level: Level,
     /// Extra evidence such as the observed and expected dependency groups.
     pub detail: Option<String>,
     /// Source excerpt containing the offending line and its neighbors.
@@ -76,6 +80,7 @@ impl Violation {
             line,
             columns: None,
             rule,
+            level: rule.default_level(),
             detail: None,
             context: SourceContext::around(text, line),
         }

@@ -3,7 +3,8 @@
 `cargo-stylecheck` is the executable and authoritative description of the
 layout rules it enforces: Rust source layout, Cargo manifest layout and TOML
 file format. Run it from the tree root; reports go to the standard error
-stream in `codespan-reporting` style — a `path:line:column` locus, the
+stream in `codespan-reporting` style — an `error[...]` or `warning[...]`
+header carrying the rule's severity, a `path:line:column` locus, the
 offending span underlined (the whole line, or exactly the violating columns
 when the rule knows them) with one neighboring line on either side, and
 rule-specific observed detail as a note. The crate is also a library:
@@ -12,16 +13,25 @@ only selects that root (the optional first argument, else the current
 directory) and the config (`--config FILE` overrides the `stylecheck.toml` at
 the scanned root and must name an existing file; `--help` and `--version`
 work as usual, and `cargo stylecheck …` behaves like the direct invocation).
+A run fails (exit 1) only when some violation sits at the `error` level;
+warnings report without failing it, and exit 2 marks a config or walk
+failure.
 
 ## Rule registry
 
 Rules are grouped by what they inspect. A rule id is its group letter followed
 by the rule's 1-based ordinal inside the group — `S` source layout, `M` Cargo
 manifest layout, `T` TOML file format. Reports print the id with the rule's
-canonical name (`error[S1 module-doc-spacing]: …`), and that canonical name
-is also the section key of a rule that has options in `stylecheck.toml`, the one
-config for all style options. The top-level `exempt-paths` array of that config
-lists the path fragments the source-layout rules skip. The top-level
+canonical name (`error[S1 module-doc-spacing]: …`, or `warning[…]` once the
+rule is downgraded), and that canonical name is also the section key of a rule
+that has options in `stylecheck.toml`, the one
+config for all style options. Every rule reports at a level: all rules
+default to `error`, and the `[levels]` map of that config overrides any rule
+by canonical name — `warn` reports without failing the run, `off` disables
+the rule so it reports nothing, `error` restores the failing default. A
+`[levels]` key naming no known rule, or a value other than `off`, `warn` or
+`error`, is a hard config error. The top-level `exempt-paths` array of that
+config lists the path fragments the source-layout rules skip. The top-level
 `scan-paths` array lists the trees the walk descends into, relative to the
 scanned root (default: the root itself; `target/` and hidden directories are
 never descended into). The ordered `[[dependency-group-order.aspects]]` array

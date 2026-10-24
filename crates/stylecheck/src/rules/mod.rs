@@ -1,9 +1,9 @@
 //! Executable implementations of the documented style rules.
 //!
 //! [`Rule`] is the registry: the `rules!` declaration groups the rules by
-//! category and carries every rule's id, canonical name and short report text.
-//! [`Rule::ALL`] lists the rules in report order: source layout (`S`), Cargo
-//! manifest layout (`M`), then TOML file format (`T`).
+//! category and carries every rule's id, canonical name, default level and
+//! short report text. [`Rule::ALL`] lists the rules in report order: source
+//! layout (`S`), Cargo manifest layout (`M`), then TOML file format (`T`).
 
 mod manifest;
 mod qualified;
@@ -14,6 +14,21 @@ pub use manifest::{
 };
 pub use qualified::{Pattern, QualifiedNamePolicy, check_qualified_names};
 pub use source::check_rust_source;
+
+/// The severity one rule reports its violations with. Every rule carries a
+/// default level in the registry; the `[levels]` section of the style config
+/// overrides it per rule by canonical name. A [`Level::Warn`] violation
+/// reports without failing the check; a [`Level::Error`] violation fails it;
+/// a [`Level::Off`] rule is disabled and reports nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    /// The rule is disabled: its violations are dropped before reporting.
+    Off,
+    /// Reported, but a run whose violations are all warnings passes.
+    Warn,
+    /// Reported, and fails the run.
+    Error,
+}
 
 /// One category of style rules; the category fixes the letter every rule id of
 /// the group starts with.
@@ -42,15 +57,15 @@ impl RuleGroup {
 }
 
 /// Declare the rule registry: one block per rule group, one entry per rule in
-/// report order, each entry carrying the rule's id, canonical name and short
-/// report message.
+/// report order, each entry carrying the rule's id, canonical name, default
+/// level and short report message.
 ///
 /// The expansion owns the whole rule surface — the enum variants in the
 /// declared order (the order violations inside one file report in), [`Rule::ALL`]
-/// and the group/id/name/message lookups — so a rule cannot exist without its
-/// metadata and an id is written exactly once. Every id must be its group's
-/// letter followed by the rule's 1-based ordinal inside the group; a
-/// `rules/mod.rs` test enforces that numbering.
+/// and the group/id/name/level/message lookups — so a rule cannot exist
+/// without its metadata and an id is written exactly once. Every id must be
+/// its group's letter followed by the rule's 1-based ordinal inside the
+/// group; a `rules/mod.rs` test enforces that numbering.
 ///
 /// The `@collect` pass accumulates the group blocks into parallel token lists,
 /// because `macro_rules!` cannot repeat the entries of one group inside a
@@ -59,16 +74,16 @@ macro_rules! rules {
     ($(
         $group:ident {
             $(
-                $id:ident: $variant:ident($name:literal) => $message:literal,
+                $id:ident: $variant:ident($name:literal) = $level:ident => $message:literal,
             )*
         }
     )*) => {
         rules! {
             @collect
-            [] [] [] [] [] []
+            [] [] [] [] [] [] []
             $(
                 $group {
-                    $($id: $variant($name) => $message,)*
+                    $($id: $variant($name) = $level => $message,)*
                 }
             )*
         }
@@ -80,6 +95,7 @@ macro_rules! rules {
         [$($group_arms:tt)*]
         [$($id_arms:tt)*]
         [$($name_arms:tt)*]
+        [$($level_arms:tt)*]
         [$($message_arms:tt)*]
     ) => {
         /// The stable identifier, canonical name, group and short report text
@@ -117,6 +133,15 @@ macro_rules! rules {
                 }
             }
 
+            /// The severity the rule reports with before the style config's
+            /// `[levels]` section overrides it. Every rule currently defaults
+            /// to [`Level::Error`], preserving the check's standing verdict.
+            pub const fn default_level(self) -> Level {
+                match self {
+                    $($level_arms)*
+                }
+            }
+
             /// Short actionable text; the full policy is maintained in the
             /// README.
             pub const fn message(self) -> &'static str {
@@ -133,10 +158,11 @@ macro_rules! rules {
         [$($group_arms:tt)*]
         [$($id_arms:tt)*]
         [$($name_arms:tt)*]
+        [$($level_arms:tt)*]
         [$($message_arms:tt)*]
         $group:ident {
             $(
-                $id:ident: $variant:ident($name:literal) => $message:literal,
+                $id:ident: $variant:ident($name:literal) = $level:ident => $message:literal,
             )*
         }
         $($rest:tt)*
@@ -154,6 +180,7 @@ macro_rules! rules {
             [$($group_arms)* $(Self::$variant => RuleGroup::$group,)*]
             [$($id_arms)* $(Self::$variant => stringify!($id),)*]
             [$($name_arms)* $(Self::$variant => $name,)*]
+            [$($level_arms)* $(Self::$variant => Level::$level,)*]
             [$($message_arms)* $(Self::$variant => $message,)*]
             $($rest)*
         }
@@ -162,34 +189,35 @@ macro_rules! rules {
 
 rules! {
     Source {
-        S1: ModuleDocSpacing("module-doc-spacing")
+        S1: ModuleDocSpacing("module-doc-spacing") = Error
             => "module-level `//!` docs need exactly one blank line before the next item",
-        S2: TestModBlankAfterAttribute("test-mod-attribute-spacing")
+        S2: TestModBlankAfterAttribute("test-mod-attribute-spacing") = Error
             => "no blank line may separate `#[cfg(test)]` from the test mod",
-        S3: TestModLeadingBlankLine("test-mod-body-spacing")
+        S3: TestModLeadingBlankLine("test-mod-body-spacing") = Error
             => "the test mod body must not open with a blank line",
-        S4: QualifiedName("qualified-name")
+        S4: QualifiedName("qualified-name") = Error
             => "qualified reference spells a module path; import the type and use its bare name, or whitelist the spelling in stylecheck.toml",
-        S5: ModBeforeUse("mod-before-use")
+        S5: ModBeforeUse("mod-before-use") = Error
             => "file-module declarations (`mod name;`) must precede every `use` item",
     }
 
     Manifest {
-        M1: ManifestParse("manifest-parse") => "manifest is not valid TOML",
-        M2: ManifestSectionOrder("section-order") => "manifest sections are out of order",
-        M3: ManifestSectionSpacing("section-spacing")
+        M1: ManifestParse("manifest-parse") = Error => "manifest is not valid TOML",
+        M2: ManifestSectionOrder("section-order") = Error => "manifest sections are out of order",
+        M3: ManifestSectionSpacing("section-spacing") = Error
             => "manifest sections need exactly one blank line between them",
-        M4: DependencyGroupOrder("dependency-group-order")
+        M4: DependencyGroupOrder("dependency-group-order") = Error
             => "dependencies are in the wrong group order",
-        M5: DependencySorted("dependency-sorting")
+        M5: DependencySorted("dependency-sorting") = Error
             => "dependencies inside a group must be sorted",
     }
 
     Toml {
-        T1: TomlLineEnding("line-endings") => "TOML must use LF line endings, not CRLF",
-        T2: TomlTrailingBlankLine("trailing-blank-line")
+        T1: TomlLineEnding("line-endings") = Error
+            => "TOML must use LF line endings, not CRLF",
+        T2: TomlTrailingBlankLine("trailing-blank-line") = Error
             => "TOML must not end with a trailing blank line",
-        T3: TomlMissingTrailingNewline("missing-trailing-newline")
+        T3: TomlMissingTrailingNewline("missing-trailing-newline") = Error
             => "TOML must end with a trailing newline",
     }
 }

@@ -18,7 +18,7 @@ use thiserror::Error;
 use crate::{
     StyleConfig, Violation,
     rules::{
-        WorkspaceMembers, check_manifest_with_workspace_members, check_rust_source,
+        Level, WorkspaceMembers, check_manifest_with_workspace_members, check_rust_source,
         check_toml_file, external_crate_names,
     },
 };
@@ -60,8 +60,10 @@ pub enum CheckError {
 /// are always checked. The root manifest is optional: a tree without one is
 /// checked without workspace-level manifest rules.
 ///
-/// Every violation is returned sorted by path, line and rule; an empty vector
-/// means the tree passes.
+/// Every violation is returned sorted by path, line and rule, carrying the
+/// severity the config assigns its rule (the rule's registered default when
+/// unconfigured); the violations of a rule disabled through `[levels]` are
+/// dropped. An empty vector means the tree passes.
 pub fn check_tree(root: &Path) -> Result<Vec<Violation>, CheckError> {
     check_tree_with_config(root, None)
 }
@@ -130,6 +132,12 @@ pub fn check_tree_with_config(
             found.extend(check_toml_file(relative, text));
         }
     }
+    for violation in &mut found {
+        violation.level = config.level_of(violation.rule);
+    }
+    // A rule disabled through `[levels]` reports nothing: its violations are
+    // dropped once every level is assigned.
+    found.retain(|violation| violation.level != Level::Off);
     found.sort();
     Ok(found)
 }
@@ -315,6 +323,34 @@ paths = ["crates/game/"]
                 .iter()
                 .any(|violation| violation.path.starts_with("elsewhere/")),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn configured_levels_stamp_their_violations() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        // The same ordering violation sits in both files; one rule is
+        // downgraded to a warning, the other disabled outright.
+        write(
+            root,
+            "stylecheck.toml",
+            "[levels]\nmod-before-use = \"warn\"\nline-endings = \"off\"\n",
+        );
+        write(root, "src/lib.rs", "use std::fmt;\n\nmod parser;\n");
+        write(root, "data.toml", "value = 1\r\n");
+
+        let found = check_tree(root).expect("the tree checks");
+        let violation = found
+            .iter()
+            .find(|violation| violation.rule == Rule::ModBeforeUse)
+            .expect("the ordering rule fires");
+        assert_eq!(violation.level, Level::Warn);
+        assert!(
+            !found
+                .iter()
+                .any(|violation| violation.rule == Rule::TomlLineEnding),
+            "a disabled rule reports nothing: {found:?}"
         );
     }
 

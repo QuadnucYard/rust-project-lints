@@ -22,4 +22,4 @@ pub use check::{CONFIG_FILE, CheckError, ROOT_MANIFEST, check_tree, check_tree_w
 pub use config::{ConfigError, StyleConfig};
 pub use diagnostic::{ColumnSpan, ContextLine, SourceContext, Violation};
 pub use report::{render_reports, write_reports};
-pub use rules::{Rule, RuleGroup};
+pub use rules::{Level, Rule, RuleGroup};

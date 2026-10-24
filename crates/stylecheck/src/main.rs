@@ -3,12 +3,15 @@
 //! The binary only selects the scanned root and the optional config file
 //! override, and reports what [`stylecheck::check_tree_with_config`] returns.
 //! The walk, the config and every rule live in the library, so another
-//! project can reuse them without this repository's layout.
+//! project can reuse them without this repository's layout. A violation at
+//! the `warn` level reports without failing the run; any `error`-level
+//! violation fails it.
 
 use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
+use stylecheck::Level;
 
 /// Layout style checker for Rust sources and Cargo/TOML manifests.
 #[derive(Debug, Parser)]
@@ -49,8 +52,18 @@ fn main() -> ExitCode {
                 eprintln!("cargo-stylecheck: failed to write the reports: {error}");
                 return ExitCode::from(2);
             }
-            eprintln!("style check failed: {} violation(s)", found.len());
-            ExitCode::from(1)
+            let errors = found
+                .iter()
+                .filter(|violation| violation.level == Level::Error)
+                .count();
+            let warnings = found.len() - errors;
+            if errors == 0 {
+                println!("style check passed: {warnings} warning(s)");
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("style check failed: {errors} error(s), {warnings} warning(s)");
+                ExitCode::from(1)
+            }
         }
         Err(error) => {
             eprintln!("cargo-stylecheck: {error}");

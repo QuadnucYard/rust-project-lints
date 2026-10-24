@@ -11,14 +11,19 @@
 //! The config also carries the two facts no rule may hard-code: which trees the
 //! walk descends into (`scan-paths`) and how the root workspace dependency
 //! aspects are named, ordered and recognized
-//! (`[[dependency-group-order.aspects]]`).
+//! (`[[dependency-group-order.aspects]]`). Rule severities live in the
+//! `[levels]` map: every rule defaults to the level its registry entry
+//! declares, and a `[levels]` key naming a rule overrides it — `warn` keeps
+//! the run passing, `error` fails it, `off` disables the rule. A key that
+//! names no known rule, or a value other than those three, is a hard error,
+//! never a silent default.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::rules::QualifiedNamePolicy;
+use crate::rules::{Level, QualifiedNamePolicy, Rule};
 
 /// Configuration parse failure; reported as a hard error by the command.
 #[derive(Debug, Error)]
@@ -45,6 +50,10 @@ struct StyleFile {
     /// Path fragments whose files the path-sensitive rules skip.
     #[serde(rename = "exempt-paths", default)]
     exempt_paths: Vec<String>,
+    /// Rule canonical name to configured level. Keys are validated against the
+    /// registry, so a misspelled rule name cannot silently keep its default.
+    #[serde(default)]
+    levels: BTreeMap<String, String>,
     #[serde(rename = "qualified-name", default)]
     qualified: QualifiedTable,
     #[serde(rename = "dependency-group-order", default)]
@@ -76,6 +85,33 @@ struct DependencyGroupOrderTable {
 struct AspectTable {
     name: String,
     paths: Vec<String>,
+}
+
+/// Resolve one `[levels]` entry. The key must name a known rule and the value
+/// must be a level spelling: a misspelled rule name would otherwise silently
+/// keep the rule's default level, and a misspelled value silently change
+/// nothing.
+fn parse_level(name: &str, value: &str) -> Result<(Rule, Level), ConfigError> {
+    let rule = Rule::ALL
+        .iter()
+        .copied()
+        .find(|rule| rule.name() == name)
+        .ok_or_else(|| ConfigError::InvalidConfig {
+            detail: format!("unknown rule `{name}` in [levels]"),
+        })?;
+    let level = match value {
+        "off" => Level::Off,
+        "warn" => Level::Warn,
+        "error" => Level::Error,
+        _ => {
+            return Err(ConfigError::InvalidConfig {
+                detail: format!(
+                    "rule `{name}` has an invalid level `{value}`; expected `off`, `warn` or `error`"
+                ),
+            });
+        }
+    };
+    Ok((rule, level))
 }
 
 /// One root workspace dependency aspect: a display name and the ordered path
@@ -133,11 +169,14 @@ impl DependencyAspect {
 /// live in the `[qualified-name]` section; the top-level `exempt-paths` array
 /// lists the paths the path-sensitive rules skip; `scan-paths` lists the trees
 /// the walk descends into; `[[dependency-group-order.aspects]]` declares the
-/// root dependency aspects in their required order.
+/// root dependency aspects in their required order; the `[levels]` map
+/// overrides rule severities, which otherwise default to each rule's
+/// registered level.
 #[derive(Debug, Clone)]
 pub struct StyleConfig {
     scan_paths: Vec<String>,
     exempt_paths: Vec<String>,
+    levels: BTreeMap<Rule, Level>,
     qualified: QualifiedNamePolicy,
     aspects: Vec<DependencyAspect>,
 }
@@ -147,6 +186,7 @@ impl Default for StyleConfig {
         Self {
             scan_paths: vec![".".to_owned()],
             exempt_paths: Vec::new(),
+            levels: BTreeMap::new(),
             qualified: QualifiedNamePolicy::default(),
             aspects: Vec::new(),
         }
@@ -167,6 +207,11 @@ impl StyleConfig {
             })?;
         let qualified =
             QualifiedNamePolicy::from_lists(file.qualified.whitelist, file.qualified.blacklist)?;
+        let levels = file
+            .levels
+            .iter()
+            .map(|(name, value)| parse_level(name, value))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         let aspects = file
             .dependency_group_order
             .aspects
@@ -186,6 +231,7 @@ impl StyleConfig {
         Ok(Self {
             scan_paths,
             exempt_paths: file.exempt_paths,
+            levels,
             qualified,
             aspects,
         })
@@ -204,6 +250,15 @@ impl StyleConfig {
     /// The `qualified-name` rule's allow/deny policy.
     pub fn qualified(&self) -> &QualifiedNamePolicy {
         &self.qualified
+    }
+
+    /// The severity `rule` reports with: its configured level, else the
+    /// default level the rule's registry entry declares.
+    pub fn level_of(&self, rule: Rule) -> Level {
+        self.levels
+            .get(&rule)
+            .copied()
+            .unwrap_or(rule.default_level())
     }
 
     /// Set the built-in external-crate exemption set.
@@ -277,6 +332,26 @@ paths = ["crates/beta/", "crates/shared/"]
         );
         // An empty entry would silently widen the walk to the scanned root.
         assert!(StyleConfig::from_toml("scan-paths = [\"\"]\n").is_err());
+    }
+
+    #[test]
+    fn levels_override_defaults_and_reject_unknown_entries() {
+        let config = StyleConfig::from_toml(
+            "[levels]\nmod-before-use = \"warn\"\nqualified-name = \"off\"\n",
+        )
+        .expect("levels parse");
+        assert_eq!(config.level_of(Rule::ModBeforeUse), Level::Warn);
+        assert_eq!(config.level_of(Rule::QualifiedName), Level::Off);
+        // A rule with no entry keeps its registered default.
+        assert_eq!(config.level_of(Rule::ModuleDocSpacing), Level::Error);
+        // A misspelled rule name or level silently keeping the default is the
+        // failure mode the validation exists to prevent.
+        for text in [
+            "[levels]\nmod-before-us = \"warn\"\n",
+            "[levels]\nmod-before-use = \"fatal\"\n",
+        ] {
+            assert!(StyleConfig::from_toml(text).is_err(), "{text:?}");
+        }
     }
 
     #[test]

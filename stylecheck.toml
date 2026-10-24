@@ -4,3 +4,10 @@
 # Trees the walk descends into, relative to the scanned root. The TOML files
 # at the scanned root are always checked.
 scan-paths = ["crates"]
+
+# Rule levels: every rule defaults to error; override any rule by canonical
+# name. `warn` reports without failing the run, `off` disables the rule. An
+# unknown rule name or a value other than off/warn/error is a hard error.
+#
+# [levels]
+# qualified-name = "warn"

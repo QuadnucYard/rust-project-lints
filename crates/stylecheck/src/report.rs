@@ -1,7 +1,8 @@
 //! Rendering violations as human-readable reports with `codespan-reporting`.
 //!
-//! Each violation becomes one rustc-style report: an `error[id name]` header,
-//! the `path:line:column` locus, the offending span underlined — the whole
+//! Each violation becomes one rustc-style report: an `error[id name]` or
+//! `warning[id name]` header carrying the violation's level, the
+//! `path:line:column` locus, the offending span underlined — the whole
 //! line, narrowed to the violating columns when the rule knows them — with
 //! one unmarked context line on either side supplied by the renderer, plus
 //! the rule-specific observed detail as a note. [`write_reports`] emits to
@@ -11,12 +12,15 @@
 use core::ops::Range;
 
 use codespan_reporting::{
-    diagnostic::{Diagnostic, Label},
+    diagnostic::{Diagnostic, Label, Severity},
     files::{Error as FilesError, Files},
     term::{self, Config, termcolor::WriteColor},
 };
 
-use crate::diagnostic::{ColumnSpan, Violation};
+use crate::{
+    Level,
+    diagnostic::{ColumnSpan, Violation},
+};
 
 /// The rendering configuration shared by both writers: one unmarked context
 /// line on either side of a label, supplied by the renderer itself.
@@ -28,7 +32,8 @@ fn config() -> Config {
     }
 }
 
-/// Write every violation to `writer` as one report, in the given order.
+/// Write every violation to `writer` as one report, in the given order. A
+/// violation of a rule disabled through `[levels]` renders nothing.
 pub fn write_reports(
     writer: &mut dyn WriteColor,
     violations: &[Violation],
@@ -36,8 +41,9 @@ pub fn write_reports(
     let config = config();
     for violation in violations {
         let file = ExcerptFile::new(violation);
-        let diagnostic = violation_diagnostic(violation, &file);
-        term::emit_to_write_style(writer, &config, &file, &diagnostic)?;
+        if let Some(diagnostic) = violation_diagnostic(violation, &file) {
+            term::emit_to_write_style(writer, &config, &file, &diagnostic)?;
+        }
     }
     Ok(())
 }
@@ -48,18 +54,22 @@ pub fn render_reports(violations: &[Violation]) -> String {
     let mut rendered = String::new();
     for violation in violations {
         let file = ExcerptFile::new(violation);
-        let diagnostic = violation_diagnostic(violation, &file);
-        rendered.push_str(&term::emit_into_string(&config, &file, &diagnostic).unwrap_or_default());
+        if let Some(diagnostic) = violation_diagnostic(violation, &file) {
+            rendered
+                .push_str(&term::emit_into_string(&config, &file, &diagnostic).unwrap_or_default());
+        }
     }
     rendered
 }
 
 /// The report of one violation: the rule as the diagnostic code and message,
-/// one primary label over the offending span — the whole line, narrowed to
-/// its columns when the rule knows them — and the observed detail as a note.
-/// The renderer draws the labeled line and the context lines around it, so
-/// the neighbors need no labels of their own.
-fn violation_diagnostic(violation: &Violation, file: &ExcerptFile<'_>) -> Diagnostic<()> {
+/// the severity of the violation as the diagnostic level, one primary label
+/// over the offending span — the whole line, narrowed to its columns when the
+/// rule knows them — and the observed detail as a note. The renderer draws
+/// the labeled line and the context lines around it, so the neighbors need no
+/// labels of their own. `None` means the rule is disabled and reports
+/// nothing.
+fn violation_diagnostic(violation: &Violation, file: &ExcerptFile<'_>) -> Option<Diagnostic<()>> {
     let labels = violation
         .context
         .lines
@@ -75,14 +85,19 @@ fn violation_diagnostic(violation: &Violation, file: &ExcerptFile<'_>) -> Diagno
             Some(Label::primary((), range))
         })
         .collect();
-    let mut diagnostic = Diagnostic::error()
+    let severity = match violation.level {
+        Level::Off => return None,
+        Level::Warn => Severity::Warning,
+        Level::Error => Severity::Error,
+    };
+    let mut diagnostic = Diagnostic::new(severity)
         .with_code(format!("{} {}", violation.rule.id(), violation.rule.name()))
         .with_message(violation.rule.message())
         .with_labels(labels);
     if let Some(detail) = &violation.detail {
         diagnostic = diagnostic.with_notes(vec![detail.clone()]);
     }
-    diagnostic
+    Some(diagnostic)
 }
 
 /// One violation's excerpt presented to `codespan-reporting` as the whole
@@ -299,5 +314,22 @@ mod tests {
         let rendered = render_reports(&[violation]);
         assert!(rendered.contains("src/lib.rs:3:1"), "{rendered}");
         assert!(rendered.contains("mod tests {"), "{rendered}");
+    }
+
+    #[test]
+    fn warn_level_violations_render_as_warnings() {
+        let mut violation = Violation::new(
+            "src/lib.rs",
+            3,
+            Rule::ModBeforeUse,
+            "use std::fmt;\n\nmod parser;\n",
+        );
+        violation.level = Level::Warn;
+        let rendered = render_reports(&[violation]);
+        assert!(
+            rendered.contains("warning[S5 mod-before-use]"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("error[S5"), "{rendered}");
     }
 }
