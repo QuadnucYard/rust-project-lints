@@ -1,0 +1,6 @@
+# Configuration for cargo-stylecheck (this repo checks itself).
+# Rules: one config at the scanned root; each rule reads its own section.
+
+# Trees the walk descends into, relative to the scanned root. The TOML files
+# at the scanned root are always checked.
+scan-paths = ["crates"]
