@@ -8,12 +8,14 @@
 mod manifest;
 mod qualified;
 mod source;
+mod toml;
+mod workspace;
 
-pub use manifest::{
-    WorkspaceMembers, check_manifest_with_workspace_members, check_toml_file, external_crate_names,
-};
+pub use manifest::check_manifest_with_workspace_members;
 pub use qualified::{Pattern, QualifiedNamePolicy, check_qualified_names};
 pub use source::check_rust_source;
+pub use toml::check_toml_file;
+pub use workspace::{WorkspaceMembers, external_crate_names};
 
 /// The severity one rule reports its violations with. Every rule carries a
 /// default level in the registry; the `[levels]` section of the style config
