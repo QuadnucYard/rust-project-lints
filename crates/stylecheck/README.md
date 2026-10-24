@@ -92,7 +92,8 @@ know.
   `[dev-dependencies]`, `[lints]`. Nested tables such as `[package.metadata]`
   are not section headers.
 - **`M3` `section-spacing`.** Adjacent sections have exactly one blank line
-  between the last content line and the next header.
+  between the last content line and the next header; an empty section's header
+  stands in as its last content line.
 - **`M4` `dependency-group-order`.** Every dependency table keeps the
   blank-delimited groups already present in the source, and each group holds
   exactly one aspect. A crate manifest orders its workspace-member dependencies

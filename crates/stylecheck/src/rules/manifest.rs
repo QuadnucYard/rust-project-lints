@@ -604,7 +604,8 @@ fn section_rank(table_path: &str) -> Option<u8> {
 
 fn blanks_after_last_content(text: &str, header_a: usize, header_b: usize) -> usize {
     let mut count = 0;
-    let mut saw_content = false;
+    // An empty group's last content line is its own header.
+    let mut saw_content = true;
     for (index, line) in text.lines().enumerate() {
         let line_no = index + 1;
         if line_no <= header_a || line_no >= header_b {
@@ -823,6 +824,41 @@ foundation-alpha.workspace = true
                 .iter()
                 .any(|violation| violation.rule == Rule::ManifestSectionSpacing)
         );
+    }
+
+    #[test]
+    fn empty_section_spacing_counts_from_its_header() {
+        let clean = r#"[package]
+name = "probe"
+
+[lib]
+
+[dependencies]
+serde.workspace = true
+"#;
+        assert!(crate_manifest(clean).is_empty());
+        for text in [
+            r#"[package]
+name = "probe"
+
+[lib]
+[dependencies]
+serde.workspace = true
+"#,
+            r#"[package]
+name = "probe"
+
+[lib]
+
+
+[dependencies]
+serde.workspace = true
+"#,
+        ] {
+            let found = crate_manifest(text);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].rule, Rule::ManifestSectionSpacing);
+        }
     }
 
     #[test]
