@@ -188,6 +188,14 @@ impl Graph {
         self.search(package, package)
     }
 
+    /// The shortest directed path length from `from` to `to`.
+    ///
+    /// The distance from a package to itself is zero; an unreachable target —
+    /// including a package outside the graph — has no distance.
+    pub fn distance(&self, from: &str, to: &str) -> Option<usize> {
+        self.path(from, to).map(|path| path.len() - 1)
+    }
+
     /// The shortest distance from any root to every package, roots included.
     ///
     /// A package no root reaches has no depth. Roots and neighbors are visited
@@ -493,6 +501,7 @@ mod tests {
             graph.path("a", "c"),
             Some(vec!["a".to_owned(), "c".to_owned()])
         );
+        assert_eq!(graph.distance("a", "c"), Some(1));
         let deep = Graph::new(
             ["a".to_owned(), "b".to_owned(), "c".to_owned()],
             [
@@ -504,10 +513,13 @@ mod tests {
             deep.path("a", "c"),
             Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
         );
+        assert_eq!(deep.distance("a", "c"), Some(2));
         assert_eq!(deep.path("c", "a"), None);
         assert_eq!(deep.path("a", "missing"), None);
         assert_eq!(deep.path("a", "a"), Some(vec!["a".to_owned()]));
+        assert_eq!(deep.distance("a", "a"), Some(0));
         assert_eq!(deep.path("missing", "missing"), None);
+        assert_eq!(deep.distance("missing", "missing"), None);
     }
 
     #[test]

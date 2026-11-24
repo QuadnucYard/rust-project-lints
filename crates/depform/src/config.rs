@@ -25,7 +25,10 @@ use serde::Deserialize;
 use toml::{Table, Value};
 
 use self::selector::{Groups, Select};
-pub(crate) use self::{range::Range, selector::Selector};
+pub(crate) use self::{
+    range::Range,
+    selector::{Selector, resolve_pairs},
+};
 use crate::{DependencyKind, DepformError, Graph};
 
 /// A parsed and validated `depform.toml`.
@@ -134,6 +137,8 @@ pub(crate) struct RuleConfig {
 pub(crate) enum RuleKind {
     /// Checks that apply to one package at a time.
     Node(Box<NodeRule>),
+    /// Checks that apply to ordered pairs of packages.
+    Pair(PairRule),
 }
 
 /// The selection and checks of a node rule.
@@ -146,6 +151,14 @@ pub(crate) struct NodeRule {
     pub(crate) height: Option<Range>,
     pub(crate) dependency_count: Option<Range>,
     pub(crate) dependent_count: Option<Range>,
+}
+
+/// The endpoints and checks of a pair rule.
+#[derive(Debug)]
+pub(crate) struct PairRule {
+    pub(crate) from: Selector,
+    pub(crate) to: Selector,
+    pub(crate) distance: Option<Range>,
 }
 
 impl RuleConfig {
@@ -164,6 +177,11 @@ impl RuleConfig {
                         selector.validate_explicit(graph, &self.name)?;
                     }
                 }
+                Ok(())
+            }
+            RuleKind::Pair(rule) => {
+                rule.from.validate_explicit(graph, &self.name)?;
+                rule.to.validate_explicit(graph, &self.name)?;
                 Ok(())
             }
         }
@@ -199,10 +217,38 @@ impl RuleConfig {
         }
     }
 
+    /// A pair rule, edited before it is returned.
+    pub(crate) fn pair_with(
+        name: &str,
+        from: Selector,
+        to: Selector,
+        edit: impl FnOnce(&mut PairRule),
+    ) -> Self {
+        let mut rule = PairRule {
+            from,
+            to,
+            distance: None,
+        };
+        edit(&mut rule);
+        Self {
+            name: name.to_owned(),
+            kind: RuleKind::Pair(rule),
+        }
+    }
+
     /// The node half of a node rule.
     fn node_rule(&self) -> &NodeRule {
         match &self.kind {
             RuleKind::Node(rule) => rule,
+            other => panic!("expected a node rule, found {other:?}"),
+        }
+    }
+
+    /// The pair half of a pair rule.
+    fn pair_rule(&self) -> &PairRule {
+        match &self.kind {
+            RuleKind::Pair(rule) => rule,
+            other => panic!("expected a pair rule, found {other:?}"),
         }
     }
 }
@@ -334,6 +380,12 @@ impl RuleConfig {
         let kind = match select {
             None => return Err(rule_error(name, "the rule needs a `select` selector")),
             Some(Select::Node(select)) => {
+                if checks.has_pair() {
+                    return Err(rule_error(
+                        name,
+                        "a pair check needs a pair selector with `from` and `to`",
+                    ));
+                }
                 if !checks.has_node() {
                     return Err(rule_error(name, "the rule needs at least one check"));
                 }
@@ -346,6 +398,28 @@ impl RuleConfig {
                     dependency_count: checks.dependency_count,
                     dependent_count: checks.dependent_count,
                 }))
+            }
+            Some(Select::Pair { from, to }) => {
+                if checks.has_node() && checks.has_pair() {
+                    return Err(rule_error(
+                        name,
+                        "a rule cannot mix node checks and pair checks",
+                    ));
+                }
+                if checks.has_node() {
+                    return Err(rule_error(
+                        name,
+                        "a pair selector can only be used with pair checks",
+                    ));
+                }
+                if !checks.has_pair() {
+                    return Err(rule_error(name, "the rule needs at least one check"));
+                }
+                RuleKind::Pair(PairRule {
+                    from,
+                    to,
+                    distance: checks.distance,
+                })
             }
         };
         Ok(Self {
@@ -364,6 +438,7 @@ struct Checks {
     height: Option<Range>,
     dependency_count: Option<Range>,
     dependent_count: Option<Range>,
+    distance: Option<Range>,
 }
 
 impl Checks {
@@ -385,6 +460,7 @@ impl Checks {
                 "dependent-count" => {
                     checks.dependent_count = Some(parse_range(name, "dependent-count", value)?);
                 }
+                "distance" => checks.distance = Some(parse_range(name, "distance", value)?),
                 other => return Err(rule_error(name, format!("unknown check `{other}`"))),
             }
         }
@@ -399,6 +475,11 @@ impl Checks {
             || self.height.is_some()
             || self.dependency_count.is_some()
             || self.dependent_count.is_some()
+    }
+
+    /// Pair checks apply to an ordered pair of packages.
+    fn has_pair(&self) -> bool {
+        self.distance.is_some()
     }
 }
 

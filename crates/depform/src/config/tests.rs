@@ -109,10 +109,20 @@ fn check_keys_populate_their_fields() {
              check.depth.min = 1\n\
              check.height.max = 2\n\
              check.dependency-count.exact = 3\n\
-             check.dependent-count.min = 4\n",
+             check.dependent-count.min = 4\n\n\
+             [rules.pair]\nselect.from = \"a\"\nselect.to = \"b\"\n\
+             check.distance.exact = 2\n",
     )
     .expect("a valid config");
-    let node = config.rules()[0].node_rule();
+    let rule = |name: &str| {
+        config
+            .rules()
+            .iter()
+            .find(|rule| rule.name == name)
+            .expect("a rule")
+    };
+
+    let node = rule("node").node_rule();
     assert_eq!(node.select.to_string(), "\"a\"");
     assert_eq!(
         node.dependencies
@@ -143,6 +153,14 @@ fn check_keys_populate_their_fields() {
     assert_eq!(
         node.dependent_count.as_ref().map(Range::render),
         Some("min 4".to_owned())
+    );
+
+    let pair = rule("pair").pair_rule();
+    assert_eq!(pair.from.to_string(), "\"a\"");
+    assert_eq!(pair.to.to_string(), "\"b\"");
+    assert_eq!(
+        pair.distance.as_ref().map(Range::render),
+        Some("exact 2".to_owned())
     );
 }
 
@@ -181,6 +199,19 @@ fn group_tables_are_validated_while_parsing() {
 }
 
 #[test]
+fn pair_selectors_are_rejected_inside_checks() {
+    for key in ["allow", "deny", "require"] {
+        assert!(
+                error(&format!(
+                    "[rules.r]\nselect = \"a\"\ncheck.dependencies.{key} = {{ from = \"a\", to = \"b\" }}\n"
+                ))
+                .contains("a pair selector is not allowed here"),
+                "`{key}`"
+            );
+    }
+}
+
+#[test]
 fn roots_are_optional_but_validated() {
     assert!(error("[graph]\nroots = []\n").contains("at least one package"));
     assert!(error("[graph]\nroots = [\"a\", \"a\"]\n").contains("repeats `a`"));
@@ -207,5 +238,37 @@ fn range_errors_name_the_check() {
     assert!(
         error("[rules.r]\nselect = \"a\"\ncheck.depth = {}\n")
             .contains("`depth`: a range needs at least one")
+    );
+}
+
+#[test]
+fn pair_checks_need_pair_selectors_and_do_not_mix() {
+    let config = Config::from_toml(
+        "[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\n\
+             check.distance.exact = 1\n",
+    )
+    .expect("a valid config");
+    let rule = config.rules()[0].pair_rule();
+    assert_eq!(rule.from.to_string(), "\"a\"");
+    assert_eq!(rule.to.to_string(), "\"b\"");
+    assert_eq!(
+        rule.distance.as_ref().map(Range::render),
+        Some("exact 1".to_owned())
+    );
+
+    assert!(
+        error("[rules.r]\nselect = \"a\"\ncheck.distance.exact = 1\n")
+            .contains("needs a pair selector")
+    );
+    assert!(
+        error("[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\ncheck.depth.max = 1\n")
+            .contains("only be used with pair checks")
+    );
+    assert!(
+        error(
+            "[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\n\
+                 check.distance.exact = 1\ncheck.depth.max = 1\n"
+        )
+        .contains("cannot mix node checks and pair checks")
     );
 }

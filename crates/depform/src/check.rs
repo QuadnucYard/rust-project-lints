@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     Config, DepformError, Graph,
-    config::{NodeRule, Range, RuleConfig, RuleKind, Selector, SetCheck},
+    config::{NodeRule, PairRule, Range, RuleConfig, RuleKind, Selector, SetCheck, resolve_pairs},
     graph::RootSearch,
     report::{Violation, render_kinds},
 };
@@ -45,6 +45,7 @@ pub fn check_graph(graph: &Graph, config: &Config) -> Result<Vec<Violation>, Dep
                     &mut violations,
                 )?;
             }
+            RuleKind::Pair(pair) => check_pair(&view, &rule.name, pair, &mut violations),
         }
     }
     Ok(violations)
@@ -93,6 +94,22 @@ fn check_node(
         }
     }
     Ok(())
+}
+
+/// Evaluate every pair check of one rule against its selected pairs.
+fn check_pair(view: &Graph, rule: &str, pair: &PairRule, violations: &mut Vec<Violation>) {
+    let selection = format!("{{ from = {}, to = {} }}", pair.from, pair.to);
+    for (from, to) in resolve_pairs(&pair.from, &pair.to, view) {
+        let report = PairReport {
+            rule,
+            selection: &selection,
+            from: &from,
+            to: &to,
+        };
+        if let Some(range) = &pair.distance {
+            check_distance(view, range, &report, violations);
+        }
+    }
 }
 
 /// The roots depth is measured from: the declared ones, or inferred.
@@ -168,6 +185,38 @@ impl NodeReport<'_> {
     }
 }
 
+/// One evaluated pair, with the rule that reports on it.
+struct PairReport<'a> {
+    rule: &'a str,
+    selection: &'a str,
+    from: &'a str,
+    to: &'a str,
+}
+
+impl PairReport<'_> {
+    /// Push one violation whose details follow the pair-check contract order.
+    fn fail(
+        &self,
+        message: impl Into<String>,
+        observed: impl Into<String>,
+        expected: impl Into<String>,
+        witness: Option<String>,
+        violations: &mut Vec<Violation>,
+    ) {
+        let mut details = vec![
+            detail("selection", self.selection),
+            detail("from", self.from),
+            detail("to", self.to),
+            detail("observed", observed),
+            detail("expected", expected),
+        ];
+        if let Some(witness) = witness {
+            details.push(detail("witness", witness));
+        }
+        violations.push(Violation::new(self.rule, message, details));
+    }
+}
+
 /// Evaluate the `depth` range for one package.
 fn check_depth(
     depth_view: &DepthView,
@@ -226,6 +275,31 @@ fn check_height(
         violations,
     );
     Ok(())
+}
+
+/// Evaluate a `distance` range for one pair.
+///
+/// An unreachable target has no distance, so the range semantics are the same
+/// as for depth: a lower bound passes, a cap or an exact value fails.
+fn check_distance(view: &Graph, range: &Range, pair: &PairReport, violations: &mut Vec<Violation>) {
+    let path = view.path(pair.from, pair.to);
+    let value = path.as_ref().map(|path| path.len() - 1);
+    if range.check(value) {
+        return;
+    }
+    pair.fail(
+        format!(
+            "distance from `{}` to `{}` is out of range",
+            pair.from, pair.to
+        ),
+        match value {
+            Some(distance) => format!("distance {distance}"),
+            None => "unreachable".to_owned(),
+        },
+        range.render(),
+        path.map(|path| path.join(" -> ")),
+        violations,
+    );
 }
 
 /// Which adjacency a degree check counts.

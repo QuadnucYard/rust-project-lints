@@ -1,9 +1,10 @@
 //! Package selectors.
 //!
 //! A [`Selector`] resolves to a set of package names, serving rule selections
-//! and the set checks. Parsing, rendering and empty-selection validation live
-//! here. Matching is purely textual: `*` is the only wildcard and regular
-//! expressions are never used.
+//! and the set checks. [`Select`] adds the pair form that only pair rules use,
+//! so pair selectors cannot reach a set check. Parsing, rendering and
+//! empty-selection validation live here. Matching is purely textual: `*` is
+//! the only wildcard and regular expressions are never used.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -37,11 +38,18 @@ pub(crate) enum Selector {
     ReachableFrom(Box<Selector>),
 }
 
-/// A rule's `select`: the packages a node rule checks.
+/// A rule's `select`: either packages, or ordered pairs of packages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Select {
     /// A selection of packages, used by node checks.
     Node(Selector),
+    /// Ordered pairs, used by pair checks.
+    Pair {
+        /// The pairs' first components.
+        from: Selector,
+        /// The pairs' second components.
+        to: Selector,
+    },
 }
 
 impl Selector {
@@ -80,6 +88,11 @@ impl Selector {
             "dependents-of" => Self::DependentsOf,
             "dependencies-of" => Self::DependenciesOf,
             "reachable-from" => Self::ReachableFrom,
+            "from" | "to" => {
+                return Err("a pair selector is not allowed here; use `dependents-of`, \
+                     `dependencies-of` or `reachable-from`"
+                    .to_owned());
+            }
             other => {
                 return Err(format!(
                     "unknown selector `{other}`; use `dependents-of`, `dependencies-of` \
@@ -181,8 +194,15 @@ impl Selector {
 }
 
 impl Select {
-    /// Parse a rule's `select`: a package selector.
+    /// Parse a rule's `select`: a pair table when it names `from` or `to`,
+    /// otherwise a package selector.
     pub(crate) fn parse(value: &Value, groups: &Groups) -> Result<Self, String> {
+        if let Value::Table(table) = value
+            && (table.contains_key("from") || table.contains_key("to"))
+        {
+            let (from, to) = parse_pair(table, groups)?;
+            return Ok(Self::Pair { from, to });
+        }
         Ok(Self::Node(Selector::parse(value, groups)?))
     }
 }
@@ -207,8 +227,50 @@ impl Display for Select {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::Node(selector) => selector.fmt(f),
+            Self::Pair { from, to } => write!(f, "{{ from = {from}, to = {to} }}"),
         }
     }
+}
+
+/// Parse a pair table: exactly `from` and `to`, both name selectors.
+fn parse_pair(table: &Table, groups: &Groups) -> Result<(Selector, Selector), String> {
+    let mut from = None;
+    let mut to = None;
+    for (key, value) in table {
+        let slot = match key.as_str() {
+            "from" => &mut from,
+            "to" => &mut to,
+            other => {
+                return Err(format!(
+                    "unknown pair selector key `{other}`; use `from` and `to`"
+                ));
+            }
+        };
+        *slot = Some(Selector::parse_name(value, groups)?);
+    }
+    let (Some(from), Some(to)) = (from, to) else {
+        return Err("a pair selector needs both `from` and `to`".to_owned());
+    };
+    Ok((from, to))
+}
+
+/// The ordered pairs `from -> to`, sorted, without self-pairs.
+pub(crate) fn resolve_pairs(
+    from: &Selector,
+    to: &Selector,
+    graph: &Graph,
+) -> Vec<(String, String)> {
+    let from = from.resolve(graph);
+    let to = to.resolve(graph);
+    let mut pairs = Vec::with_capacity(from.len() * to.len());
+    for source in &from {
+        for target in &to {
+            if source != target {
+                pairs.push((source.clone(), target.clone()));
+            }
+        }
+    }
+    pairs
 }
 
 /// The packages of `graph` that `matches` accepts, sorted.
@@ -502,6 +564,12 @@ mod tests {
         Selector::parse(&value, groups)
     }
 
+    /// Parse a rule selection written as a TOML document.
+    fn select(source: &str, groups: &Groups) -> Result<Select, String> {
+        let value = toml::from_str::<Value>(source).expect("valid TOML");
+        Select::parse(&value, groups)
+    }
+
     /// `app -> facade -> core`, `other -> facade`, `core -> base`.
     fn layer_graph() -> Graph {
         Graph::new(
@@ -590,6 +658,11 @@ mod tests {
              `reachable-from`"
         );
         assert!(
+            document("from = \"a\"\nto = \"b\"", &groups)
+                .expect_err("a pair selector in a name position")
+                .contains("a pair selector is not allowed here")
+        );
+        assert!(
             document("dependents-of = { dependencies-of = \"a\" }", &groups)
                 .expect_err("a nested table")
                 .contains("expected a name selector")
@@ -603,6 +676,56 @@ mod tests {
             Selector::parse(&Value::Table(Table::new()), &groups).expect_err("an empty table"),
             "a selector table must name exactly one of `dependents-of`, \
              `dependencies-of` and `reachable-from`"
+        );
+    }
+
+    #[test]
+    fn pair_selectors_yield_ordered_pairs_without_self_pairs() {
+        let groups = groups(&[("layers", &["facade", "core"])]);
+        let graph = layer_graph();
+        let selection =
+            select("from = \"app\"\nto = \"@layers\"", &groups).expect("a pair selector");
+        let Select::Pair { from, to } = &selection else {
+            panic!("a pair selection");
+        };
+        assert_eq!(selection.to_string(), "{ from = \"app\", to = @layers }");
+        assert_eq!(
+            resolve_pairs(from, to, &graph),
+            [
+                ("app".to_owned(), "core".to_owned()),
+                ("app".to_owned(), "facade".to_owned()),
+            ]
+        );
+
+        let self_pairs = select("from = \"app\"\nto = \"app\"", &groups).expect("a pair selector");
+        let Select::Pair { from, to } = &self_pairs else {
+            panic!("a pair selection");
+        };
+        assert!(resolve_pairs(from, to, &graph).is_empty());
+    }
+
+    #[test]
+    fn pair_tables_need_both_ends() {
+        let groups = groups(&[]);
+        assert!(
+            select("from = \"a\"", &groups)
+                .expect_err("a missing end")
+                .contains("needs both `from` and `to`")
+        );
+        assert!(
+            select("to = \"a\"", &groups)
+                .expect_err("a missing end")
+                .contains("needs both `from` and `to`")
+        );
+        assert!(
+            select("from = \"a\"\nto = \"b\"\nvia = \"c\"", &groups)
+                .expect_err("an extra key")
+                .contains("unknown pair selector key `via`")
+        );
+        assert!(
+            select("from = { dependents-of = \"a\" }\nto = \"b\"", &groups)
+                .expect_err("a nested table")
+                .contains("expected a name selector")
         );
     }
 }

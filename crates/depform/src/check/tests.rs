@@ -45,6 +45,10 @@ fn node_with(name: &str, select: &str, edit: impl FnOnce(&mut NodeRule)) -> Rule
     RuleConfig::node_with(name, sel(select), edit)
 }
 
+fn pair_with(name: &str, from: &str, to: &str, edit: impl FnOnce(&mut PairRule)) -> RuleConfig {
+    RuleConfig::pair_with(name, sel(from), sel(to), edit)
+}
+
 /// A set check with the given selectors.
 fn set(allow: Option<&str>, deny: Option<&str>, require: Option<&str>) -> SetCheck {
     SetCheck {
@@ -753,4 +757,110 @@ fn a_derived_selection_may_be_empty() {
             .expect("a check")
             .is_empty()
     );
+}
+
+#[test]
+fn distance_reports_the_offending_value_and_witness() {
+    let passing_rule = pair_with("r", "app", "core", |rule| {
+        rule.distance = Some(Range::exact(2));
+    });
+    let passing = Config::from_rules(vec![passing_rule]);
+    assert!(
+        check_graph(&layered_graph(), &passing)
+            .expect("a check")
+            .is_empty()
+    );
+
+    let capped_rule = pair_with("r", "app", "core", |rule| {
+        rule.distance = Some(Range::max(1));
+    });
+    let capped = Config::from_rules(vec![capped_rule]);
+    let violations = check_graph(&layered_graph(), &capped).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "distance from `app` to `core` is out of range"
+    );
+    assert_eq!(
+        keys(&violations[0]),
+        ["selection", "from", "to", "observed", "expected", "witness"]
+    );
+    assert_eq!(
+        value(&violations[0], "selection"),
+        "{ from = \"app\", to = \"core\" }"
+    );
+    assert_eq!(value(&violations[0], "from"), "app");
+    assert_eq!(value(&violations[0], "to"), "core");
+    assert_eq!(value(&violations[0], "observed"), "distance 2");
+    assert_eq!(value(&violations[0], "expected"), "max 1");
+    assert_eq!(value(&violations[0], "witness"), "app -> facade -> core");
+}
+
+#[test]
+fn unreachable_pairs_pass_a_lower_bound_and_fail_a_cap() {
+    let lower_rule = pair_with("r", "app", "tool", |rule| {
+        rule.distance = Some(Range::min(1));
+    });
+    let lower = Config::from_rules(vec![lower_rule]);
+    assert!(
+        check_graph(&layered_graph(), &lower)
+            .expect("a check")
+            .is_empty()
+    );
+
+    let capped_rule = pair_with("r", "app", "tool", |rule| {
+        rule.distance = Some(Range::max(1));
+    });
+    let capped = Config::from_rules(vec![capped_rule]);
+    let violations = check_graph(&layered_graph(), &capped).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(value(&violations[0], "observed"), "unreachable");
+    assert_eq!(
+        keys(&violations[0]),
+        ["selection", "from", "to", "observed", "expected"]
+    );
+}
+
+#[test]
+fn pair_selections_iterate_in_sorted_pair_order() {
+    let rule = RuleConfig::pair_with(
+        "r",
+        Selector::Union(vec![sel("app"), sel("other")]),
+        sel("core"),
+        |rule| {
+            rule.distance = Some(Range::max(1));
+        },
+    );
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&consumers_graph(), &config).expect("a check");
+    let from: Vec<&str> = violations
+        .iter()
+        .map(|violation| value(violation, "from"))
+        .collect();
+    assert_eq!(from, ["app", "other"]);
+    assert_eq!(value(&violations[0], "witness"), "app -> facade -> core");
+    assert_eq!(value(&violations[1], "witness"), "other -> facade -> core");
+}
+
+#[test]
+fn a_stale_pair_end_is_a_config_error() {
+    let rule = pair_with("r", "app", "gone", |rule| {
+        rule.distance = Some(Range::max(1));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&layered_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("rule `r`"), "{error}");
+    assert!(error.contains("\"gone\""), "{error}");
+
+    let rule = pair_with("r", "gone", "core", |rule| {
+        rule.distance = Some(Range::max(1));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&layered_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("rule `r`"), "{error}");
+    assert!(error.contains("\"gone\""), "{error}");
 }

@@ -136,6 +136,34 @@ A package no root reaches has no depth: `min` passes it, `max` and `exact` fail
 it, and the detail reads `observed: unreachable`. A depth violation names its
 witness, for example `app (0) -> facade (1) -> core (2)`.
 
+### Pair distance
+
+```toml
+[rules.app-to-core]
+select.from = "app"
+select.to = "@core"
+check.distance.exact = 2
+```
+
+A pair selector names a `from` and a `to` name selector and yields every
+ordered pair except a package paired with itself. A rule holding a pair
+selector may only carry pair checks, and a pair check needs a pair selector.
+Pair selectors are only valid as a rule's `select`: `allow`, `deny` and
+`require` take name selectors.
+
+`distance` is the shortest directed path length between the two packages:
+
+| range       | what it asserts                                      |
+| ----------- | ---------------------------------------------------- |
+| `min = 1`   | nothing: an unreachable pair has no distance and passes |
+| `min = 2`   | `to` is not a direct dependency of `from`            |
+| `max = 1`   | `to` is a direct dependency of `from`                |
+| `exact = 1` | `to` is a direct dependency of `from`                |
+
+An unreachable pair has no distance, so `min` passes it while `max` and `exact`
+fail it with `observed: unreachable`. A violation lists `from` and `to`
+separately and names a witness path such as `app -> facade -> core`.
+
 ### Selectors
 
 A selector is a string: a package name, or a pattern where `*` matches any run
