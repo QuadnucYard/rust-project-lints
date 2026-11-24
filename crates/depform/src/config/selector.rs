@@ -10,7 +10,7 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
-use toml::Value;
+use toml::{Table, Value};
 
 use super::is_identifier;
 use crate::{DepformError, Graph};
@@ -29,6 +29,12 @@ pub(crate) enum Selector {
     },
     /// The union of the listed selectors.
     Union(Vec<Selector>),
+    /// The direct dependents of the inner selection.
+    DependentsOf(Box<Selector>),
+    /// The direct dependencies of the inner selection.
+    DependenciesOf(Box<Selector>),
+    /// The transitive dependencies of the inner selection.
+    ReachableFrom(Box<Selector>),
 }
 
 /// A rule's `select`: the packages a node rule checks.
@@ -44,8 +50,47 @@ impl Selector {
         match value {
             Value::String(text) => Self::parse_text(text, groups),
             Value::Array(items) => Self::parse_union(items, groups),
+            Value::Table(table) => Self::parse_table(table, groups),
             other => Err(format!("expected a selector, found {other}")),
         }
+    }
+
+    /// Parse a name selector: a string or an array of strings, never a table.
+    ///
+    /// Structural arguments must be name selectors because structural
+    /// selectors do not compose.
+    fn parse_name(value: &Value, groups: &Groups) -> Result<Self, String> {
+        match value {
+            Value::String(_) | Value::Array(_) => Self::parse(value, groups),
+            other => Err(format!("expected a name selector, found {other}")),
+        }
+    }
+
+    /// Parse a graph-position table with exactly one key.
+    fn parse_table(table: &Table, groups: &Groups) -> Result<Self, String> {
+        let mut entries = table.iter();
+        let Some((key, argument)) = entries.next() else {
+            return Err(
+                "a selector table must name exactly one of `dependents-of`, \
+                 `dependencies-of` and `reachable-from`"
+                    .to_owned(),
+            );
+        };
+        let inner = match key.as_str() {
+            "dependents-of" => Self::DependentsOf,
+            "dependencies-of" => Self::DependenciesOf,
+            "reachable-from" => Self::ReachableFrom,
+            other => {
+                return Err(format!(
+                    "unknown selector `{other}`; use `dependents-of`, `dependencies-of` \
+                     or `reachable-from`"
+                ));
+            }
+        };
+        if entries.next().is_some() {
+            return Err("a selector table must name exactly one key".to_owned());
+        }
+        Ok(inner(Box::new(Self::parse_name(argument, groups)?)))
     }
 
     /// Parse an array selector, whose entries must be strings.
@@ -88,6 +133,21 @@ impl Selector {
                     .any(|pattern| matches_pattern(pattern, package))
             }),
             Self::Union(items) => items.iter().flat_map(|item| item.resolve(graph)).collect(),
+            Self::DependentsOf(inner) => {
+                union_neighbors(graph, inner, |graph, package, selected| {
+                    selected.extend(graph.dependents(package).map(str::to_owned));
+                })
+            }
+            Self::DependenciesOf(inner) => {
+                union_neighbors(graph, inner, |graph, package, selected| {
+                    selected.extend(graph.dependencies(package).map(str::to_owned));
+                })
+            }
+            Self::ReachableFrom(inner) => {
+                union_neighbors(graph, inner, |graph, package, selected| {
+                    selected.extend(graph.reachable(package));
+                })
+            }
         }
     }
 
@@ -105,6 +165,9 @@ impl Selector {
                 }
                 Ok(())
             }
+            Self::DependentsOf(inner)
+            | Self::DependenciesOf(inner)
+            | Self::ReachableFrom(inner) => inner.validate_explicit(graph, rule),
             Self::Name(_) | Self::Group { .. } => {
                 if self.resolve(graph).is_empty() {
                     return Err(DepformError::Config(format!(
@@ -133,6 +196,9 @@ impl Display for Selector {
                 let rendered: Vec<String> = items.iter().map(ToString::to_string).collect();
                 write!(f, "[{}]", rendered.join(", "))
             }
+            Self::DependentsOf(inner) => write!(f, "{{ dependents-of = {inner} }}"),
+            Self::DependenciesOf(inner) => write!(f, "{{ dependencies-of = {inner} }}"),
+            Self::ReachableFrom(inner) => write!(f, "{{ reachable-from = {inner} }}"),
         }
     }
 }
@@ -152,6 +218,19 @@ fn selected(graph: &Graph, matches: impl Fn(&str) -> bool) -> BTreeSet<String> {
         .filter(|package| matches(package))
         .map(str::to_owned)
         .collect()
+}
+
+/// Resolve `inner` and union the neighbor sets `extend` adds per package.
+fn union_neighbors(
+    graph: &Graph,
+    inner: &Selector,
+    mut extend: impl FnMut(&Graph, &str, &mut BTreeSet<String>),
+) -> BTreeSet<String> {
+    let mut selected = BTreeSet::new();
+    for package in inner.resolve(graph) {
+        extend(graph, &package, &mut selected);
+    }
+    selected
 }
 
 /// The `[groups]` table: named lists of package-name patterns.
@@ -244,8 +323,6 @@ pub(crate) fn matches_pattern(pattern: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use toml::Table;
-
     use super::*;
 
     fn groups(entries: &[(&str, &[&str])]) -> Groups {
@@ -336,7 +413,11 @@ mod tests {
         assert!(Selector::parse(&Value::Integer(1), &groups).is_err());
         assert!(Selector::parse(&Value::Array(Vec::new()), &groups).is_err());
         assert!(Selector::parse(&Value::Array(vec![Value::Integer(1)]), &groups).is_err());
-        assert!(Selector::parse(&Value::Table(Table::new()), &groups).is_err());
+        assert!(
+            Selector::parse(&Value::Table(Table::new()), &groups)
+                .expect_err("a table selector")
+                .contains("exactly one of")
+        );
     }
 
     #[test]
@@ -412,6 +493,116 @@ mod tests {
                 .expect_err("an invalid name")
                 .to_string()
                 .contains("invalid group name")
+        );
+    }
+
+    /// Parse a selector written as a TOML document.
+    fn document(source: &str, groups: &Groups) -> Result<Selector, String> {
+        let value = toml::from_str::<Value>(source).expect("valid TOML");
+        Selector::parse(&value, groups)
+    }
+
+    /// `app -> facade -> core`, `other -> facade`, `core -> base`.
+    fn layer_graph() -> Graph {
+        Graph::new(
+            ["app", "other", "facade", "core", "base"]
+                .iter()
+                .map(|name| (*name).to_owned()),
+            [
+                (
+                    "app".to_owned(),
+                    "facade".to_owned(),
+                    crate::DependencyKind::Normal,
+                ),
+                (
+                    "other".to_owned(),
+                    "facade".to_owned(),
+                    crate::DependencyKind::Normal,
+                ),
+                (
+                    "facade".to_owned(),
+                    "core".to_owned(),
+                    crate::DependencyKind::Normal,
+                ),
+                (
+                    "core".to_owned(),
+                    "base".to_owned(),
+                    crate::DependencyKind::Normal,
+                ),
+            ],
+        )
+    }
+
+    fn resolved(source: &str, groups: &Groups, graph: &Graph) -> BTreeSet<String> {
+        document(source, groups)
+            .expect("a valid selector")
+            .resolve(graph)
+    }
+
+    #[test]
+    fn position_selectors_follow_one_or_more_edges() {
+        let groups = groups(&[]);
+        let graph = layer_graph();
+        assert_eq!(
+            resolved("dependents-of = \"facade\"", &groups, &graph),
+            BTreeSet::from(["app".to_owned(), "other".to_owned()])
+        );
+        assert_eq!(
+            resolved("dependencies-of = \"facade\"", &groups, &graph),
+            BTreeSet::from(["core".to_owned()])
+        );
+        assert_eq!(
+            resolved("reachable-from = \"app\"", &groups, &graph),
+            BTreeSet::from(["base".to_owned(), "core".to_owned(), "facade".to_owned()])
+        );
+        assert_eq!(
+            resolved("reachable-from = \"facade\"", &groups, &graph),
+            BTreeSet::from(["base".to_owned(), "core".to_owned()])
+        );
+    }
+
+    #[test]
+    fn position_arguments_accept_groups_and_unions() {
+        let groups = groups(&[("middle", &["facade"])]);
+        let graph = layer_graph();
+        assert_eq!(
+            resolved("dependents-of = \"@middle\"", &groups, &graph),
+            BTreeSet::from(["app".to_owned(), "other".to_owned()])
+        );
+        assert_eq!(
+            resolved("dependencies-of = [\"app\", \"core\"]", &groups, &graph),
+            BTreeSet::from(["base".to_owned(), "facade".to_owned()])
+        );
+    }
+
+    #[test]
+    fn position_selectors_render_and_reject_bad_shapes() {
+        let groups = groups(&[("core", &["core"])]);
+        assert_eq!(
+            document("dependents-of = \"@core\"", &groups)
+                .expect("a selector")
+                .to_string(),
+            "{ dependents-of = @core }"
+        );
+        assert_eq!(
+            document("via = 1", &groups).expect_err("an unknown key"),
+            "unknown selector `via`; use `dependents-of`, `dependencies-of` or \
+             `reachable-from`"
+        );
+        assert!(
+            document("dependents-of = { dependencies-of = \"a\" }", &groups)
+                .expect_err("a nested table")
+                .contains("expected a name selector")
+        );
+        assert!(
+            document("dependents-of = \"a\"\ndependencies-of = \"b\"", &groups)
+                .expect_err("two keys")
+                .contains("exactly one key")
+        );
+        assert_eq!(
+            Selector::parse(&Value::Table(Table::new()), &groups).expect_err("an empty table"),
+            "a selector table must name exactly one of `dependents-of`, \
+             `dependencies-of` and `reachable-from`"
         );
     }
 }

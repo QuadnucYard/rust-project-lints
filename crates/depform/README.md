@@ -160,3 +160,24 @@ check.dependencies.allow = "@core"
   rule, and a union is validated entry by entry. A group is validated as a
   whole, so one stale pattern inside an otherwise matching group is tolerated.
   An unused group is never checked against the graph.
+
+A table selector selects by graph position:
+
+```toml
+[rules.consumers]
+select.dependents-of = "@core"        # packages with an edge to a core package
+check.depth.max = 2
+
+[rules.layering]
+select.reachable-from = "app"         # everything app reaches transitively
+check.dependencies.deny = "legacy-*"
+```
+
+- `dependents-of S` selects the direct consumers of `S`, `dependencies-of S`
+  its direct dependencies, and `reachable-from S` everything reachable from
+  `S` by one or more edges.
+- The argument must be a name selector: a string or an array of strings.
+  Tables nested inside tables are a config error.
+- The argument is validated like any other explicit selector, while the derived
+  selection may be empty: the consumers of a package nobody depends on form an
+  empty set, and its assertions then hold vacuously.

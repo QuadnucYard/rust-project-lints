@@ -668,3 +668,89 @@ fn a_cycle_in_the_downstream_cone_is_a_graph_error() {
     assert!(error.contains("cannot compute height of `a`"), "{error}");
     assert!(error.contains("dependency cycle a -> b -> a"), "{error}");
 }
+
+/// `app -> facade -> core`, plus `other -> facade`.
+fn consumers_graph() -> Graph {
+    Graph::new(
+        names(&["app", "other", "facade", "core"]),
+        [
+            edge("app", "facade", DependencyKind::Normal),
+            edge("other", "facade", DependencyKind::Normal),
+            edge("facade", "core", DependencyKind::Normal),
+        ],
+    )
+}
+
+#[test]
+fn a_position_selector_checks_exactly_its_packages() {
+    let passing_rule = RuleConfig::node_with(
+        "r",
+        Selector::DependentsOf(Box::new(sel("facade"))),
+        |rule| {
+            rule.depth = Some(Range::exact(0));
+        },
+    );
+    let passing = Config::from_rules(vec![passing_rule]).with_roots(["app", "other"]);
+    assert!(
+        check_graph(&consumers_graph(), &passing)
+            .expect("a check")
+            .is_empty()
+    );
+
+    let failing_rule = RuleConfig::node_with(
+        "r",
+        Selector::DependentsOf(Box::new(sel("facade"))),
+        |rule| {
+            rule.depth = Some(Range::min(1));
+        },
+    );
+    let failing = Config::from_rules(vec![failing_rule]).with_roots(["app", "other"]);
+    let violations = check_graph(&consumers_graph(), &failing).expect("a check");
+    assert_eq!(violations.len(), 2);
+    assert_eq!(
+        value(&violations[0], "selection"),
+        "{ dependents-of = \"facade\" }"
+    );
+    assert_eq!(value(&violations[0], "package"), "app");
+    assert_eq!(value(&violations[1], "package"), "other");
+}
+
+#[test]
+fn a_transitive_position_selector_checks_the_reached_packages() {
+    let rule = RuleConfig::node_with("r", Selector::ReachableFrom(Box::new(sel("app"))), |rule| {
+        rule.dependencies = Some(set(None, Some("core"), None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&consumers_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(value(&violations[0], "package"), "facade");
+    assert_eq!(
+        value(&violations[0], "selection"),
+        "{ reachable-from = \"app\" }"
+    );
+}
+
+#[test]
+fn a_stale_position_argument_is_a_config_error() {
+    let rule = RuleConfig::node_with("r", Selector::DependentsOf(Box::new(sel("gone"))), |rule| {
+        rule.dependency_count = Some(Range::max(5));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&app_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("gone"), "{error}");
+}
+
+#[test]
+fn a_derived_selection_may_be_empty() {
+    let rule = RuleConfig::node_with("r", Selector::DependentsOf(Box::new(sel("app"))), |rule| {
+        rule.dependency_count = Some(Range::max(0));
+    });
+    let config = Config::from_rules(vec![rule]);
+    assert!(
+        check_graph(&app_graph(), &config)
+            .expect("a check")
+            .is_empty()
+    );
+}
