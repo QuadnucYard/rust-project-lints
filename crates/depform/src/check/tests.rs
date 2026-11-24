@@ -618,3 +618,53 @@ fn degree_checks_count_distinct_neighbors_in_the_view() {
     assert_eq!(value(&violations[0], "observed"), "dependency count 1");
     assert_eq!(value(&violations[0], "expected"), "min 2");
 }
+
+#[test]
+fn height_reports_the_longest_chain() {
+    let rule = node_with("r", "facade", |rule| {
+        rule.height = Some(Range::max(0));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&layered_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "height of package `facade` is out of range"
+    );
+    assert_eq!(
+        keys(&violations[0]),
+        ["selection", "package", "observed", "expected", "witness"]
+    );
+    assert_eq!(value(&violations[0], "observed"), "height 1");
+    assert_eq!(value(&violations[0], "witness"), "facade -> core");
+
+    let leaf = node_with("r", "core", |rule| {
+        rule.height = Some(Range::exact(0));
+    });
+    let passing = Config::from_rules(vec![leaf]);
+    assert!(
+        check_graph(&layered_graph(), &passing)
+            .expect("a check")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_cycle_in_the_downstream_cone_is_a_graph_error() {
+    let graph = Graph::new(
+        names(&["a", "b"]),
+        [
+            edge("a", "b", DependencyKind::Normal),
+            edge("b", "a", DependencyKind::Normal),
+        ],
+    );
+    let rule = node_with("r", "a", |rule| {
+        rule.height = Some(Range::max(1));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&graph, &config)
+        .expect_err("a graph error")
+        .to_string();
+    assert!(error.contains("cannot compute height of `a`"), "{error}");
+    assert!(error.contains("dependency cycle a -> b -> a"), "{error}");
+}

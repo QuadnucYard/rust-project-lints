@@ -124,6 +124,12 @@ always validated against the graph.
 `dependency-count` and `dependent-count` count distinct direct neighbors in the
 view, so a filtered-out kind does not count.
 
+`height` is the longest downstream path length in edges; a package with no
+dependencies has height 0. The metric exists only in an acyclic downstream
+cone: if a cycle is reachable from the package, the height is undefined and the
+check fails as a graph error naming the package and the cycle. A violation
+names the longest chain, for example `witness: app -> facade -> core`.
+
 Every metric check is a range: `min`, `max`, `exact`, or `min` and `max`,
 inclusive, with non-negative values. `exact` cannot be combined with the bounds.
 A package no root reaches has no depth: `min` passes it, `max` and `exact` fail

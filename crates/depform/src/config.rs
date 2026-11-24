@@ -143,6 +143,7 @@ pub(crate) struct NodeRule {
     pub(crate) dependencies: Option<SetCheck>,
     pub(crate) reachable: Option<SetCheck>,
     pub(crate) depth: Option<Range>,
+    pub(crate) height: Option<Range>,
     pub(crate) dependency_count: Option<Range>,
     pub(crate) dependent_count: Option<Range>,
 }
@@ -187,6 +188,7 @@ impl RuleConfig {
             dependencies: None,
             reachable: None,
             depth: None,
+            height: None,
             dependency_count: None,
             dependent_count: None,
         };
@@ -340,6 +342,7 @@ impl RuleConfig {
                     dependencies: checks.dependencies,
                     reachable: checks.reachable,
                     depth: checks.depth,
+                    height: checks.height,
                     dependency_count: checks.dependency_count,
                     dependent_count: checks.dependent_count,
                 }))
@@ -358,6 +361,7 @@ struct Checks {
     dependencies: Option<SetCheck>,
     reachable: Option<SetCheck>,
     depth: Option<Range>,
+    height: Option<Range>,
     dependency_count: Option<Range>,
     dependent_count: Option<Range>,
 }
@@ -374,6 +378,7 @@ impl Checks {
                     checks.reachable = Some(SetCheck::parse(name, "reachable", value, groups)?);
                 }
                 "depth" => checks.depth = Some(parse_range(name, "depth", value)?),
+                "height" => checks.height = Some(parse_range(name, "height", value)?),
                 "dependency-count" => {
                     checks.dependency_count = Some(parse_range(name, "dependency-count", value)?);
                 }
@@ -391,6 +396,7 @@ impl Checks {
         self.dependencies.is_some()
             || self.reachable.is_some()
             || self.depth.is_some()
+            || self.height.is_some()
             || self.dependency_count.is_some()
             || self.dependent_count.is_some()
     }

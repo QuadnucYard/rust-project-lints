@@ -239,6 +239,54 @@ impl Graph {
         RootSearch { depths, parents }
     }
 
+    /// The longest downstream path length from `package`, with a witness path.
+    ///
+    /// A package with no dependencies has height 0 and a one-element path.
+    /// Ties keep the first longest branch in sorted neighbor order. A cycle in
+    /// the downstream cone leaves the height undefined, reported as an error
+    /// that spells the cycle.
+    pub fn height(&self, package: &str) -> Result<(usize, Vec<String>), String> {
+        if !self.contains(package) {
+            return Err(format!("package `{package}` is not in the graph"));
+        }
+        let mut memo = BTreeMap::new();
+        let mut stack = Vec::new();
+        self.height_with(package, &mut memo, &mut stack)
+    }
+
+    /// Memoized depth-first height search along one DFS stack.
+    fn height_with(
+        &self,
+        package: &str,
+        memo: &mut BTreeMap<String, (usize, Vec<String>)>,
+        stack: &mut Vec<String>,
+    ) -> Result<(usize, Vec<String>), String> {
+        if let Some(known) = memo.get(package) {
+            return Ok(known.clone());
+        }
+        stack.push(package.to_owned());
+        let mut best: Option<(usize, Vec<String>)> = None;
+        for next in self.dependencies(package) {
+            if let Some(position) = stack.iter().position(|entry| entry == next) {
+                let mut cycle = stack[position..].to_vec();
+                cycle.push(next.to_owned());
+                return Err(format!("dependency cycle {}", cycle.join(" -> ")));
+            }
+            let (height, path) = self.height_with(next, memo, stack)?;
+            let height = height + 1;
+            if best.as_ref().is_none_or(|(longest, _)| height > *longest) {
+                let mut witness = Vec::with_capacity(path.len() + 1);
+                witness.push(package.to_owned());
+                witness.extend(path);
+                best = Some((height, witness));
+            }
+        }
+        stack.pop();
+        let result = best.unwrap_or_else(|| (0, vec![package.to_owned()]));
+        memo.insert(package.to_owned(), result.clone());
+        Ok(result)
+    }
+
     /// Breadth-first search for `to`.
     ///
     /// The start is seeded as visited, so a search towards the start itself
@@ -592,6 +640,94 @@ mod tests {
         assert_eq!(
             graph.depth_path(&roots, "d"),
             Some(vec!["a".to_owned(), "b".to_owned(), "d".to_owned()])
+        );
+    }
+
+    #[test]
+    fn height_is_the_longest_downstream_path() {
+        let graph = layered();
+        assert_eq!(graph.height("facade"), Ok((1, names(&["facade", "core"]))));
+        assert_eq!(
+            graph.height("app"),
+            Ok((2, names(&["app", "facade", "core"])))
+        );
+        assert_eq!(graph.height("core"), Ok((0, names(&["core"]))));
+    }
+
+    #[test]
+    fn the_longest_branch_wins_and_ties_keep_the_sorted_one() {
+        let graph = Graph::new(
+            [
+                "app".to_owned(),
+                "short".to_owned(),
+                "deep".to_owned(),
+                "leaf".to_owned(),
+            ],
+            [
+                edge("app", "short", DependencyKind::Normal),
+                edge("app", "deep", DependencyKind::Normal),
+                edge("deep", "leaf", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(
+            graph.height("app"),
+            Ok((2, names(&["app", "deep", "leaf"])))
+        );
+
+        let tied = Graph::new(
+            ["app".to_owned(), "beta".to_owned(), "alpha".to_owned()],
+            [
+                edge("app", "beta", DependencyKind::Normal),
+                edge("app", "alpha", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(tied.height("app"), Ok((1, names(&["app", "alpha"]))));
+    }
+
+    #[test]
+    fn a_cycle_in_the_cone_makes_height_undefined() {
+        let graph = Graph::new(
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "a", DependencyKind::Normal),
+            ],
+        );
+        let error = graph.height("a").expect_err("a cycle");
+        assert_eq!(error, "dependency cycle a -> b -> a");
+
+        let self_loop = Graph::new(["a".to_owned()], [edge("a", "a", DependencyKind::Normal)]);
+        assert_eq!(
+            self_loop.height("a").expect_err("a cycle"),
+            "dependency cycle a -> a"
+        );
+    }
+
+    #[test]
+    fn a_cycle_outside_the_cone_is_irrelevant() {
+        let graph = Graph::new(
+            [
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("c", "d", DependencyKind::Normal),
+                edge("d", "c", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(graph.height("a"), Ok((1, names(&["a", "b"]))));
+        assert!(graph.height("c").is_err());
+    }
+
+    #[test]
+    fn height_rejects_unknown_packages() {
+        let graph = layered();
+        assert_eq!(
+            graph.height("missing").expect_err("an unknown package"),
+            "package `missing` is not in the graph"
         );
     }
 }

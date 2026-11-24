@@ -107,6 +107,7 @@ fn check_keys_populate_their_fields() {
              check.dependencies.deny = \"b\"\n\
              check.reachable.require = \"c\"\n\
              check.depth.min = 1\n\
+             check.height.max = 2\n\
              check.dependency-count.exact = 3\n\
              check.dependent-count.min = 4\n",
     )
@@ -130,6 +131,10 @@ fn check_keys_populate_their_fields() {
     assert_eq!(
         node.depth.as_ref().map(Range::render),
         Some("min 1".to_owned())
+    );
+    assert_eq!(
+        node.height.as_ref().map(Range::render),
+        Some("max 2".to_owned())
     );
     assert_eq!(
         node.dependency_count.as_ref().map(Range::render),

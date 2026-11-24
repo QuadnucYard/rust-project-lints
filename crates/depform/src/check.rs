@@ -43,7 +43,7 @@ pub fn check_graph(graph: &Graph, config: &Config) -> Result<Vec<Violation>, Dep
                     &rule.name,
                     node,
                     &mut violations,
-                );
+                )?;
             }
         }
     }
@@ -57,7 +57,7 @@ fn check_node(
     rule: &str,
     node: &NodeRule,
     violations: &mut Vec<Violation>,
-) {
+) -> Result<(), DepformError> {
     let selection = node.select.to_string();
     let dependencies = node
         .dependencies
@@ -82,6 +82,9 @@ fn check_node(
         if let (Some(range), Some(depth_view)) = (&node.depth, depth_view) {
             check_depth(depth_view, range, &report, violations);
         }
+        if let Some(range) = &node.height {
+            check_height(view, range, &report, violations)?;
+        }
         if let Some(range) = &node.dependency_count {
             check_count(view, CountKind::Dependencies, range, &report, violations);
         }
@@ -89,6 +92,7 @@ fn check_node(
             check_count(view, CountKind::Dependents, range, &report, violations);
         }
     }
+    Ok(())
 }
 
 /// The roots depth is measured from: the declared ones, or inferred.
@@ -192,6 +196,36 @@ fn check_depth(
         witness,
         violations,
     );
+}
+
+/// Evaluate the `height` range for one package.
+///
+/// A cycle in the downstream cone leaves the height undefined, which is a
+/// graph error rather than a violation: the config asked an unanswerable
+/// question about the graph as it is.
+fn check_height(
+    view: &Graph,
+    range: &Range,
+    node: &NodeReport,
+    violations: &mut Vec<Violation>,
+) -> Result<(), DepformError> {
+    let (height, path) = view.height(node.package).map_err(|detail| {
+        DepformError::Graph(format!(
+            "cannot compute height of `{}`: {detail}",
+            node.package
+        ))
+    })?;
+    if range.check(Some(height)) {
+        return Ok(());
+    }
+    node.fail(
+        format!("height of package `{}` is out of range", node.package),
+        format!("height {height}"),
+        range.render(),
+        Some(path.join(" -> ")),
+        violations,
+    );
+    Ok(())
 }
 
 /// Which adjacency a degree check counts.
