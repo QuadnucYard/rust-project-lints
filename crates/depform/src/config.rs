@@ -23,8 +23,8 @@ use std::{
 use serde::Deserialize;
 use toml::{Table, Value};
 
-use self::selector::Select;
 pub(crate) use self::selector::Selector;
+use self::selector::{Groups, Select};
 use crate::{DependencyKind, DepformError, Graph};
 
 /// A parsed and validated `depform.toml`.
@@ -40,9 +40,10 @@ impl Config {
         let file: ConfigFile =
             toml::from_str(text).map_err(|error| DepformError::Config(error.to_string()))?;
         let graph = GraphSettings::parse(&file.graph)?;
+        let groups = Groups::new(file.groups)?;
         let mut rules = Vec::with_capacity(file.rules.len());
         for (name, rule) in file.rules {
-            rules.push(RuleConfig::parse(&name, rule)?);
+            rules.push(RuleConfig::parse(&name, rule, &groups)?);
         }
         Ok(Self { graph, rules })
     }
@@ -147,6 +148,11 @@ impl RuleConfig {
 
 #[cfg(test)]
 impl RuleConfig {
+    /// A node rule with no checks.
+    pub(crate) fn node(name: &str, select: Selector) -> Self {
+        Self::node_with(name, select, |_| {})
+    }
+
     /// A node rule, edited before it is returned.
     pub(crate) fn node_with(
         name: &str,
@@ -198,11 +204,12 @@ impl SetCheck {
     }
 }
 
-/// The top-level document: `[graph]` and `[rules]` tables.
+/// The top-level document: `[graph]`, `[groups]` and `[rules]` tables.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     graph: GraphFile,
+    groups: BTreeMap<String, Vec<String>>,
     rules: BTreeMap<String, RuleFile>,
 }
 
@@ -259,7 +266,7 @@ impl GraphSettings {
 }
 
 impl RuleConfig {
-    fn parse(name: &str, rule: RuleFile) -> Result<Self, DepformError> {
+    fn parse(name: &str, rule: RuleFile, groups: &Groups) -> Result<Self, DepformError> {
         if !is_identifier(name) {
             return Err(config_error(format!(
                 "invalid rule name {name:?}: use ASCII alphanumerics, `_` and `-`"
@@ -269,9 +276,11 @@ impl RuleConfig {
         let check = check
             .as_table()
             .ok_or_else(|| rule_error(name, "`check` must be a table"))?;
-        let checks = Checks::parse(name, check)?;
+        let checks = Checks::parse(name, check, groups)?;
         let select = match select {
-            Some(value) => Some(Select::parse(&value).map_err(|detail| rule_error(name, detail))?),
+            Some(value) => {
+                Some(Select::parse(&value, groups).map_err(|detail| rule_error(name, detail))?)
+            }
             None => None,
         };
         let kind = match select {
@@ -300,12 +309,12 @@ struct Checks {
 }
 
 impl Checks {
-    fn parse(name: &str, table: &Table) -> Result<Self, DepformError> {
+    fn parse(name: &str, table: &Table, groups: &Groups) -> Result<Self, DepformError> {
         let mut checks = Self::default();
         for (key, value) in table {
             match key.as_str() {
                 "dependencies" => {
-                    checks.dependencies = Some(SetCheck::parse(name, "dependency", value)?);
+                    checks.dependencies = Some(SetCheck::parse(name, "dependency", value, groups)?);
                 }
                 other => return Err(rule_error(name, format!("unknown check `{other}`"))),
             }
@@ -320,7 +329,12 @@ impl Checks {
 }
 
 impl SetCheck {
-    fn parse(rule: &str, label: &str, value: &Value) -> Result<Self, DepformError> {
+    fn parse(
+        rule: &str,
+        label: &str,
+        value: &Value,
+        groups: &Groups,
+    ) -> Result<Self, DepformError> {
         let table = value
             .as_table()
             .ok_or_else(|| rule_error(rule, format!("a {label} check must be a table")))?;
@@ -341,7 +355,7 @@ impl SetCheck {
                     ));
                 }
             };
-            *slot = Some(parse_selector(rule, value)?);
+            *slot = Some(parse_selector(rule, value, groups)?);
         }
         if check.is_empty() {
             return Err(rule_error(
@@ -354,8 +368,8 @@ impl SetCheck {
 }
 
 /// Parse a selector value in the context of one rule.
-fn parse_selector(rule: &str, value: &Value) -> Result<Selector, DepformError> {
-    Selector::parse(value).map_err(|detail| rule_error(rule, detail))
+fn parse_selector(rule: &str, value: &Value, groups: &Groups) -> Result<Selector, DepformError> {
+    Selector::parse(value, groups).map_err(|detail| rule_error(rule, detail))
 }
 
 /// Build a config error that names one rule.

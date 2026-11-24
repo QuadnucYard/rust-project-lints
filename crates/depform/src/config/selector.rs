@@ -6,12 +6,13 @@
 //! expressions are never used.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
 use toml::Value;
 
+use super::is_identifier;
 use crate::{DepformError, Graph};
 
 /// A set of packages selected by a config rule.
@@ -19,6 +20,15 @@ use crate::{DepformError, Graph};
 pub(crate) enum Selector {
     /// A package-name pattern; `*` matches any run of characters.
     Name(String),
+    /// A group reference, carrying the patterns the group declares.
+    Group {
+        /// The group name as written after `@`.
+        name: String,
+        /// The patterns the group declares; they match as a union.
+        patterns: Vec<String>,
+    },
+    /// The union of the listed selectors.
+    Union(Vec<Selector>),
 }
 
 /// A rule's `select`: the packages a node rule checks.
@@ -30,15 +40,40 @@ pub(crate) enum Select {
 
 impl Selector {
     /// Parse one selector value.
-    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+    pub(crate) fn parse(value: &Value, groups: &Groups) -> Result<Self, String> {
         match value {
-            Value::String(text) => Self::parse_text(text),
+            Value::String(text) => Self::parse_text(text, groups),
+            Value::Array(items) => Self::parse_union(items, groups),
             other => Err(format!("expected a selector, found {other}")),
         }
     }
 
-    /// Parse a string selector: a name pattern.
-    fn parse_text(text: &str) -> Result<Self, String> {
+    /// Parse an array selector, whose entries must be strings.
+    fn parse_union(items: &[Value], groups: &Groups) -> Result<Self, String> {
+        if items.is_empty() {
+            return Err("a selector array must list at least one selector".to_owned());
+        }
+        let mut selectors = Vec::with_capacity(items.len());
+        for item in items {
+            let Value::String(text) = item else {
+                return Err(format!("a selector array holds strings, found {item}"));
+            };
+            selectors.push(Self::parse_text(text, groups)?);
+        }
+        Ok(Self::Union(selectors))
+    }
+
+    /// Parse a string selector: a group reference or a name pattern.
+    fn parse_text(text: &str, groups: &Groups) -> Result<Self, String> {
+        if let Some(name) = text.strip_prefix('@') {
+            let Some(patterns) = groups.get(name) else {
+                return Err(format!("unknown group `@{name}`"));
+            };
+            return Ok(Self::Group {
+                name: name.to_owned(),
+                patterns: patterns.to_vec(),
+            });
+        }
         validate_pattern(text)?;
         Ok(Self::Name(text.to_owned()))
     }
@@ -47,16 +82,30 @@ impl Selector {
     pub(crate) fn resolve(&self, graph: &Graph) -> BTreeSet<String> {
         match self {
             Self::Name(pattern) => selected(graph, |package| matches_pattern(pattern, package)),
+            Self::Group { patterns, .. } => selected(graph, |package| {
+                patterns
+                    .iter()
+                    .any(|pattern| matches_pattern(pattern, package))
+            }),
+            Self::Union(items) => items.iter().flat_map(|item| item.resolve(graph)).collect(),
         }
     }
 
     /// Reject a selector whose explicit name leaves match nothing.
     ///
     /// A pattern that selects no package is almost certainly a typo, so it is
-    /// a config error rather than a rule that silently holds.
+    /// a config error rather than a rule that silently holds. A group is
+    /// validated as a whole, so one stale pattern inside an otherwise matching
+    /// group is tolerated.
     pub(crate) fn validate_explicit(&self, graph: &Graph, rule: &str) -> Result<(), DepformError> {
         match self {
-            Self::Name(_) => {
+            Self::Union(items) => {
+                for item in items {
+                    item.validate_explicit(graph, rule)?;
+                }
+                Ok(())
+            }
+            Self::Name(_) | Self::Group { .. } => {
                 if self.resolve(graph).is_empty() {
                     return Err(DepformError::Config(format!(
                         "rule `{rule}`: selector {self} matches no package in the graph"
@@ -70,8 +119,8 @@ impl Selector {
 
 impl Select {
     /// Parse a rule's `select`: a package selector.
-    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
-        Ok(Self::Node(Selector::parse(value)?))
+    pub(crate) fn parse(value: &Value, groups: &Groups) -> Result<Self, String> {
+        Ok(Self::Node(Selector::parse(value, groups)?))
     }
 }
 
@@ -79,6 +128,11 @@ impl Display for Selector {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::Name(pattern) => write!(f, "{pattern:?}"),
+            Self::Group { name, .. } => write!(f, "@{name}"),
+            Self::Union(items) => {
+                let rendered: Vec<String> = items.iter().map(ToString::to_string).collect();
+                write!(f, "[{}]", rendered.join(", "))
+            }
         }
     }
 }
@@ -98,6 +152,45 @@ fn selected(graph: &Graph, matches: impl Fn(&str) -> bool) -> BTreeSet<String> {
         .filter(|package| matches(package))
         .map(str::to_owned)
         .collect()
+}
+
+/// The `[groups]` table: named lists of package-name patterns.
+#[derive(Debug, Default)]
+pub(crate) struct Groups {
+    groups: BTreeMap<String, Vec<String>>,
+}
+
+impl Groups {
+    /// Validate the declared groups and keep them for selector resolution.
+    pub(crate) fn new(groups: BTreeMap<String, Vec<String>>) -> Result<Groups, DepformError> {
+        for (name, patterns) in &groups {
+            if !is_identifier(name) {
+                return Err(DepformError::Config(format!(
+                    "invalid group name {name:?}: use ASCII alphanumerics, `_` and `-`"
+                )));
+            }
+            if patterns.is_empty() {
+                return Err(DepformError::Config(format!(
+                    "group `{name}` must list at least one pattern"
+                )));
+            }
+            for pattern in patterns {
+                if pattern.starts_with('@') {
+                    return Err(DepformError::Config(format!(
+                        "group `{name}` entries are patterns, not group references: {pattern:?}"
+                    )));
+                }
+                validate_pattern(pattern)
+                    .map_err(|detail| DepformError::Config(format!("group `{name}`: {detail}")))?;
+            }
+        }
+        Ok(Self { groups })
+    }
+
+    /// The patterns of `name`, or `None` when the group is not declared.
+    fn get(&self, name: &str) -> Option<&[String]> {
+        self.groups.get(name).map(Vec::as_slice)
+    }
 }
 
 /// Reject patterns outside the supported character set.
@@ -154,6 +247,30 @@ mod tests {
     use toml::Table;
 
     use super::*;
+
+    fn groups(entries: &[(&str, &[&str])]) -> Groups {
+        let table: BTreeMap<String, Vec<String>> = entries
+            .iter()
+            .map(|(name, patterns)| {
+                (
+                    (*name).to_owned(),
+                    patterns
+                        .iter()
+                        .map(|pattern| (*pattern).to_owned())
+                        .collect(),
+                )
+            })
+            .collect();
+        Groups::new(table).expect("valid groups")
+    }
+
+    fn graph(names: &[&str]) -> Graph {
+        Graph::new(names.iter().map(|name| (*name).to_owned()), [])
+    }
+
+    fn selector(value: &str, groups: &Groups) -> Selector {
+        Selector::parse(&Value::String(value.to_owned()), groups).expect("a valid selector")
+    }
 
     #[test]
     fn an_exact_pattern_matches_only_itself() {
@@ -212,11 +329,89 @@ mod tests {
     }
 
     #[test]
-    fn name_selectors_parse_strings() {
+    fn name_selectors_parse_strings_and_string_arrays() {
+        let groups = groups(&[]);
         let value = Value::String("core*".to_owned());
-        assert!(Selector::parse(&value).is_ok());
-        assert!(Selector::parse(&Value::Integer(1)).is_err());
-        assert!(Selector::parse(&Value::Array(Vec::new())).is_err());
-        assert!(Selector::parse(&Value::Table(Table::new())).is_err());
+        assert!(Selector::parse(&value, &groups).is_ok());
+        assert!(Selector::parse(&Value::Integer(1), &groups).is_err());
+        assert!(Selector::parse(&Value::Array(Vec::new()), &groups).is_err());
+        assert!(Selector::parse(&Value::Array(vec![Value::Integer(1)]), &groups).is_err());
+        assert!(Selector::parse(&Value::Table(Table::new()), &groups).is_err());
+    }
+
+    #[test]
+    fn a_group_resolves_its_patterns_as_a_union() {
+        let groups = groups(&[("core", &["core", "shared-*"]), ("clients", &["client*"])]);
+        let graph = graph(&["core", "shared-utils", "client-a", "app"]);
+        assert_eq!(
+            selector("@core", &groups).resolve(&graph),
+            BTreeSet::from(["core".to_owned(), "shared-utils".to_owned()])
+        );
+        assert_eq!(
+            selector("@clients", &groups).resolve(&graph),
+            BTreeSet::from(["client-a".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_union_combines_names_groups_and_patterns() {
+        let groups = groups(&[("core", &["core"])]);
+        let graph = graph(&["core", "extra", "other"]);
+        let union = Selector::parse(
+            &Value::Array(vec![
+                Value::String("@core".to_owned()),
+                Value::String("extra".to_owned()),
+            ]),
+            &groups,
+        )
+        .expect("a union");
+        assert_eq!(
+            union.resolve(&graph),
+            BTreeSet::from(["core".to_owned(), "extra".to_owned()])
+        );
+        assert_eq!(union.to_string(), "[@core, \"extra\"]");
+    }
+
+    #[test]
+    fn unknown_groups_are_rejected() {
+        let groups = groups(&[]);
+        let error = Selector::parse(&Value::String("@nope".to_owned()), &groups)
+            .expect_err("an unknown group");
+        assert_eq!(error, "unknown group `@nope`");
+    }
+
+    #[test]
+    fn group_tables_reject_references_and_bad_shapes() {
+        let table: BTreeMap<String, Vec<String>> =
+            BTreeMap::from([("a".to_owned(), vec!["@b".to_owned()])]);
+        assert!(
+            Groups::new(table)
+                .expect_err("a group reference")
+                .to_string()
+                .contains("not group references")
+        );
+        let table: BTreeMap<String, Vec<String>> = BTreeMap::from([("a".to_owned(), Vec::new())]);
+        assert!(
+            Groups::new(table)
+                .expect_err("an empty group")
+                .to_string()
+                .contains("at least one pattern")
+        );
+        let table: BTreeMap<String, Vec<String>> =
+            BTreeMap::from([("a".to_owned(), vec![String::new()])]);
+        assert!(
+            Groups::new(table)
+                .expect_err("an empty entry")
+                .to_string()
+                .contains("must not be empty")
+        );
+        let table: BTreeMap<String, Vec<String>> =
+            BTreeMap::from([("a b".to_owned(), vec!["x".to_owned()])]);
+        assert!(
+            Groups::new(table)
+                .expect_err("an invalid name")
+                .to_string()
+                .contains("invalid group name")
+        );
     }
 }

@@ -69,8 +69,8 @@ structure and all work. Unknown keys are hard errors at every level.
 
 ```toml
 [rules.core-isolation]
-select = "client-*"
-check.dependencies.allow = "core"
+select = "@clients"
+check.dependencies.allow = "@core"
 check.dependencies.deny = "legacy-*"
 check.dependencies.require = "logging"
 ```
@@ -84,3 +84,28 @@ For every selected package `u`:
 The assertions are independent and conjunctive: `allow` is not an exception to
 `deny`, and one edge can break both. Details name the offending edge with its
 kinds, for example `dependency client -> core (normal, dev)`.
+
+### Selectors
+
+A selector is a string: a package name, or a pattern where `*` matches any run
+of characters (including none). Characters are ASCII alphanumerics, `-`, `_`
+and `*`; matching is case-sensitive and covers the whole package name.
+
+```toml
+[groups]
+core = ["*-core", "shared-*"]
+clients = ["game-client", "web-*"]
+
+[rules.core-isolation]
+select = ["@clients", "tools"]
+check.dependencies.allow = "@core"
+```
+
+- `@name` references a group declared in `[groups]`. A group's entries are
+  patterns, never group references.
+- An array is a union of at least one string selector; it may mix patterns and
+  group references.
+- A selector that matches no package in the view is a config error naming the
+  rule, and a union is validated entry by entry. A group is validated as a
+  whole, so one stale pattern inside an otherwise matching group is tolerated.
+  An unused group is never checked against the graph.

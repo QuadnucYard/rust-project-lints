@@ -110,3 +110,8 @@ fn rule_names_use_the_identifier_alphabet() {
         .is_ok()
     );
 }
+
+#[test]
+fn group_tables_are_validated_while_parsing() {
+    assert!(error("[groups]\ncore = []\n").contains("at least one pattern"));
+}

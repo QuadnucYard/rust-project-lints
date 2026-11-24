@@ -217,3 +217,98 @@ fn an_explicit_selector_that_matches_nothing_is_a_config_error() {
     assert!(error.contains("rule `r`"), "{error}");
     assert!(error.contains("\"nope\""), "{error}");
 }
+
+#[test]
+fn packages_and_dependencies_are_reported_in_sorted_order() {
+    let graph = Graph::new(
+        names(&["app", "zulu", "alpha"]),
+        [
+            edge("app", "zulu", DependencyKind::Normal),
+            edge("app", "alpha", DependencyKind::Normal),
+            edge("zulu", "alpha", DependencyKind::Normal),
+        ],
+    );
+    let rule = node_with("r", "app", |rule| {
+        rule.select = Selector::Union(vec![sel("zulu"), sel("app")]);
+        rule.dependencies = Some(set(None, Some("*"), None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&graph, &config).expect("a check");
+    let observed: Vec<&str> = violations
+        .iter()
+        .map(|violation| value(violation, "observed"))
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            "dependency app -> alpha (normal)",
+            "dependency app -> zulu (normal)",
+            "dependency zulu -> alpha (normal)",
+        ]
+    );
+}
+
+#[test]
+fn a_group_is_validated_as_a_whole() {
+    let group = Selector::Group {
+        name: "core".to_owned(),
+        patterns: vec!["core".to_owned(), "gone*".to_owned()],
+    };
+    let rule = RuleConfig::node_with("r", sel("app"), |rule| {
+        rule.dependencies = Some(SetCheck {
+            allow: None,
+            deny: Some(group),
+            require: None,
+        });
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&app_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(value(&violations[0], "expected"), "deny @core");
+}
+
+#[test]
+fn a_referenced_group_matching_nothing_is_a_config_error() {
+    let stale = Selector::Group {
+        name: "stale".to_owned(),
+        patterns: vec!["nope*".to_owned()],
+    };
+    let config = Config::from_rules(vec![RuleConfig::node("r", stale)]);
+    let error = check_graph(&app_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("rule `r`"), "{error}");
+    assert!(error.contains("@stale"), "{error}");
+}
+
+#[test]
+fn an_unused_group_matching_nothing_is_accepted() {
+    let config = parse_config(
+        "[groups]\nunused = [\"nope*\"]\n\n\
+             [rules.r]\nselect = \"app\"\ncheck.dependencies.deny = \"core\"\n",
+    );
+    assert_eq!(
+        check_graph(&app_graph(), &config).expect("a check").len(),
+        1
+    );
+}
+
+#[test]
+fn a_union_is_validated_entry_by_entry() {
+    let union = Selector::Union(vec![
+        sel("app"),
+        Selector::Group {
+            name: "core".to_owned(),
+            patterns: vec!["core".to_owned()],
+        },
+        sel("gone*"),
+    ]);
+    let rule = RuleConfig::node_with("r", union, |rule| {
+        rule.dependencies = Some(set(None, Some("core"), None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&app_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("gone*"), "{error}");
+}
