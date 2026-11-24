@@ -1,0 +1,21 @@
+[package]
+name = "cargo-depform"
+description = "Dependency graph architecture checker for Cargo workspaces"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[lib]
+name = "depform"
+
+[dependencies]
+cargo_metadata.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
