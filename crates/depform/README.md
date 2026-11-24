@@ -85,6 +85,23 @@ The assertions are independent and conjunctive: `allow` is not an exception to
 `deny`, and one edge can break both. Details name the offending edge with its
 kinds, for example `dependency client -> core (normal, dev)`.
 
+### Transitive reachability
+
+```toml
+[rules.core-isolation]
+select = "@clients"
+check.reachable.allow = "@core"
+```
+
+`reachable` applies the same three assertions to the packages reachable from
+`u` by one or more edges rather than to its direct dependencies. The selected
+package itself is not in the set unless a cycle leads back to it. Details name
+a witness path, for example `path app -> middle -> core`, so a transitive
+violation is traceable to a concrete chain.
+
+`reachable` and `dependencies` are independent: an edge can break both, and
+each violation names its own assertion.
+
 ### Selectors
 
 A selector is a string: a package name, or a pattern where `*` matches any run

@@ -20,6 +20,19 @@ fn app_graph() -> Graph {
     )
 }
 
+/// `app -> middle -> core`, plus a direct `app -> shared` edge and an
+/// unconnected `isolated` package.
+fn chain_graph() -> Graph {
+    Graph::new(
+        names(&["app", "middle", "core", "shared", "isolated"]),
+        [
+            edge("app", "middle", DependencyKind::Normal),
+            edge("app", "shared", DependencyKind::Normal),
+            edge("middle", "core", DependencyKind::Normal),
+        ],
+    )
+}
+
 fn parse_config(text: &str) -> Config {
     Config::from_toml(text).expect("a valid config")
 }
@@ -244,6 +257,113 @@ fn packages_and_dependencies_are_reported_in_sorted_order() {
             "dependency app -> alpha (normal)",
             "dependency app -> zulu (normal)",
             "dependency zulu -> alpha (normal)",
+        ]
+    );
+}
+
+#[test]
+fn reachable_deny_reports_the_witness_path() {
+    let rule = node_with("r", "app", |rule| {
+        rule.reachable = Some(set(None, Some("core"), None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&chain_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "package `app` reaches denied package `core`"
+    );
+    assert_eq!(
+        value(&violations[0], "observed"),
+        "path app -> middle -> core"
+    );
+    assert_eq!(value(&violations[0], "expected"), "deny \"core\"");
+}
+
+#[test]
+fn reachable_deny_reports_a_cycle_back_to_the_package() {
+    let graph = Graph::new(
+        names(&["a", "b"]),
+        [
+            edge("a", "b", DependencyKind::Normal),
+            edge("b", "a", DependencyKind::Normal),
+        ],
+    );
+    let rule = node_with("r", "a", |rule| {
+        rule.reachable = Some(set(None, Some("a"), None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&graph, &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "package `a` reaches denied package `a`"
+    );
+    assert_eq!(value(&violations[0], "observed"), "path a -> b -> a");
+}
+
+#[test]
+fn reachable_allow_reports_every_reached_package_outside_the_set() {
+    let rule = node_with("r", "app", |rule| {
+        rule.reachable = Some(set(Some("middle"), None, None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&chain_graph(), &config).expect("a check");
+    let reached: Vec<&str> = violations
+        .iter()
+        .map(|violation| value(violation, "observed"))
+        .collect();
+    assert_eq!(
+        reached,
+        ["path app -> middle -> core", "path app -> shared"]
+    );
+    assert_eq!(
+        violations[0].message(),
+        "package `app` reaches `core`, which is outside the allowed set"
+    );
+}
+
+#[test]
+fn reachable_require_reports_missing_reachable_packages() {
+    let rule = node_with("r", "app", |rule| {
+        rule.reachable = Some(set(None, None, Some("isolated")));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&chain_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "package `app` cannot reach required package `isolated`"
+    );
+    assert_eq!(
+        value(&violations[0], "observed"),
+        "missing reachable isolated"
+    );
+}
+
+#[test]
+fn reachable_checks_follow_dependency_checks_per_package() {
+    let rule = node_with("r", "app", |rule| {
+        rule.dependencies = Some(set(None, Some("middle"), None));
+        rule.reachable = Some(set(None, Some("core"), None));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let graph = Graph::new(
+        names(&["app", "middle", "core"]),
+        [
+            edge("app", "middle", DependencyKind::Normal),
+            edge("middle", "core", DependencyKind::Normal),
+        ],
+    );
+    let violations = check_graph(&graph, &config).expect("a check");
+    assert_eq!(
+        violations
+            .iter()
+            .map(Violation::message)
+            .collect::<Vec<_>>(),
+        [
+            "package `app` has a denied dependency `middle`",
+            "package `app` reaches denied package `core`",
         ]
     );
 }

@@ -127,6 +127,7 @@ pub(crate) enum RuleKind {
 pub(crate) struct NodeRule {
     pub(crate) select: Selector,
     pub(crate) dependencies: Option<SetCheck>,
+    pub(crate) reachable: Option<SetCheck>,
 }
 
 impl RuleConfig {
@@ -135,7 +136,7 @@ impl RuleConfig {
         match &self.kind {
             RuleKind::Node(rule) => {
                 rule.select.validate_explicit(graph, &self.name)?;
-                for check in [&rule.dependencies].into_iter().flatten() {
+                for check in [&rule.dependencies, &rule.reachable].into_iter().flatten() {
                     for selector in check.selectors() {
                         selector.validate_explicit(graph, &self.name)?;
                     }
@@ -162,6 +163,7 @@ impl RuleConfig {
         let mut rule = NodeRule {
             select,
             dependencies: None,
+            reachable: None,
         };
         edit(&mut rule);
         Self {
@@ -292,6 +294,7 @@ impl RuleConfig {
                 RuleKind::Node(Box::new(NodeRule {
                     select,
                     dependencies: checks.dependencies,
+                    reachable: checks.reachable,
                 }))
             }
         };
@@ -306,6 +309,7 @@ impl RuleConfig {
 #[derive(Debug, Default)]
 struct Checks {
     dependencies: Option<SetCheck>,
+    reachable: Option<SetCheck>,
 }
 
 impl Checks {
@@ -316,6 +320,9 @@ impl Checks {
                 "dependencies" => {
                     checks.dependencies = Some(SetCheck::parse(name, "dependency", value, groups)?);
                 }
+                "reachable" => {
+                    checks.reachable = Some(SetCheck::parse(name, "reachable", value, groups)?);
+                }
                 other => return Err(rule_error(name, format!("unknown check `{other}`"))),
             }
         }
@@ -324,7 +331,7 @@ impl Checks {
 
     /// Node checks apply to one package at a time.
     fn has_node(&self) -> bool {
-        self.dependencies.is_some()
+        self.dependencies.is_some() || self.reachable.is_some()
     }
 }
 

@@ -43,6 +43,10 @@ fn check_node(view: &Graph, rule: &str, node: &NodeRule, violations: &mut Vec<Vi
         .dependencies
         .as_ref()
         .map(|check| ResolvedSet::new(check, view));
+    let reachable = node
+        .reachable
+        .as_ref()
+        .map(|check| ResolvedSet::new(check, view));
     for package in node.select.resolve(view) {
         let report = NodeReport {
             rule,
@@ -51,6 +55,9 @@ fn check_node(view: &Graph, rule: &str, node: &NodeRule, violations: &mut Vec<Vi
         };
         if let Some(sets) = &dependencies {
             check_sets(view, SetKind::Dependencies, sets, &report, violations);
+        }
+        if let Some(sets) = &reachable {
+            check_sets(view, SetKind::Reachable, sets, &report, violations);
         }
     }
 }
@@ -115,6 +122,8 @@ fn resolve<'a>(
 enum SetKind {
     /// Direct dependencies.
     Dependencies,
+    /// Transitive reachability.
+    Reachable,
 }
 
 impl SetKind {
@@ -122,6 +131,7 @@ impl SetKind {
     fn neighbors(self, view: &Graph, package: &str) -> BTreeSet<String> {
         match self {
             Self::Dependencies => view.dependencies(package).map(str::to_owned).collect(),
+            Self::Reachable => view.reachable(package),
         }
     }
 
@@ -129,6 +139,7 @@ impl SetKind {
     fn observation(self, view: &Graph, package: &str, target: &str) -> String {
         match self {
             Self::Dependencies => edge_observation(view, package, target),
+            Self::Reachable => path_observation(view, package, target),
         }
     }
 
@@ -137,6 +148,9 @@ impl SetKind {
         match self {
             Self::Dependencies => {
                 format!("package `{package}` has a dependency outside the allowed set: `{target}`")
+            }
+            Self::Reachable => {
+                format!("package `{package}` reaches `{target}`, which is outside the allowed set")
             }
         }
     }
@@ -147,6 +161,9 @@ impl SetKind {
             Self::Dependencies => {
                 format!("package `{package}` has a denied dependency `{target}`")
             }
+            Self::Reachable => {
+                format!("package `{package}` reaches denied package `{target}`")
+            }
         }
     }
 
@@ -156,6 +173,9 @@ impl SetKind {
             Self::Dependencies => {
                 format!("package `{package}` is missing required dependency `{target}`")
             }
+            Self::Reachable => {
+                format!("package `{package}` cannot reach required package `{target}`")
+            }
         }
     }
 
@@ -163,6 +183,7 @@ impl SetKind {
     fn missing_observation(self, target: &str) -> String {
         match self {
             Self::Dependencies => format!("missing dependency {target}"),
+            Self::Reachable => format!("missing reachable {target}"),
         }
     }
 }
@@ -228,4 +249,19 @@ fn edge_observation(view: &Graph, from: &str, to: &str) -> String {
         .edge_kinds(from, to)
         .expect("a direct dependency has an edge");
     format!("dependency {from} -> {to} ({})", render_kinds(kinds))
+}
+
+/// Render an observed path from the checked view.
+///
+/// The caller only asks for a path it already knows exists: the package is in
+/// the source's reachable set. A package that reaches itself through a cycle
+/// is reported with its shortest closed path.
+fn path_observation(view: &Graph, from: &str, to: &str) -> String {
+    let path = if from == to {
+        view.cycle_path(from)
+    } else {
+        view.path(from, to)
+    }
+    .expect("a reachable package has a path");
+    format!("path {}", path.join(" -> "))
 }

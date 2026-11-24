@@ -3,10 +3,11 @@
 //! Nodes are the package names of workspace members, and edges are their
 //! workspace-internal dependency declarations. The module stays free of
 //! metadata, configuration and reporting types so the algorithms are reusable
-//! and testable on hand-built graphs.
+//! and testable on hand-built graphs. Every traversal walks adjacency in
+//! sorted order, which keeps witness paths and diagnostics deterministic.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
@@ -151,6 +152,78 @@ impl Graph {
             .flatten()
             .map(String::as_str)
     }
+
+    /// The packages reachable from `package` by one or more edges, sorted.
+    ///
+    /// The start is included only when a cycle leads back to it.
+    pub fn reachable(&self, package: &str) -> BTreeSet<String> {
+        let mut seen = BTreeSet::new();
+        let mut queue: Vec<String> = self.dependencies(package).map(str::to_owned).collect();
+        while let Some(node) = queue.pop() {
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            queue.extend(self.dependencies(&node).map(str::to_owned));
+        }
+        seen
+    }
+
+    /// A shortest path from `from` to `to`, endpoints included.
+    ///
+    /// A package in the graph has a one-element path to itself, while a
+    /// package outside it has none. Neighbors are visited in sorted order, so
+    /// the returned path is deterministic.
+    pub fn path(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        if from == to {
+            return self.contains(from).then(|| vec![from.to_owned()]);
+        }
+        self.search(from, to)
+    }
+
+    /// A shortest cycle through `package`, with the package repeated at both
+    /// ends.
+    ///
+    /// `None` means no path leads from the package back to itself.
+    pub fn cycle_path(&self, package: &str) -> Option<Vec<String>> {
+        self.search(package, package)
+    }
+
+    /// Breadth-first search for `to`.
+    ///
+    /// The start is seeded as visited, so a search towards the start itself
+    /// only succeeds by leaving it and returning, which is exactly a cycle.
+    fn search(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        let mut parents: BTreeMap<String, Option<String>> =
+            BTreeMap::from([(from.to_owned(), None)]);
+        let mut queue = VecDeque::from([from.to_owned()]);
+        while let Some(node) = queue.pop_front() {
+            for next in self.dependencies(&node) {
+                if next == to {
+                    let mut path = trail(&parents, &node);
+                    path.push(to.to_owned());
+                    return Some(path);
+                }
+                if parents.contains_key(next) {
+                    continue;
+                }
+                parents.insert(next.to_owned(), Some(node.clone()));
+                queue.push_back(next.to_owned());
+            }
+        }
+        None
+    }
+}
+
+/// Walk parent links from `to` back to the start and return the path.
+fn trail(parents: &BTreeMap<String, Option<String>>, to: &str) -> Vec<String> {
+    let mut path = Vec::new();
+    let mut current = Some(to.to_owned());
+    while let Some(node) = current {
+        current = parents.get(&node).cloned().flatten();
+        path.push(node);
+    }
+    path.reverse();
+    path
 }
 
 #[cfg(test)]
@@ -159,6 +232,10 @@ mod tests {
 
     fn edge(from: &str, to: &str, kind: DependencyKind) -> (String, String, DependencyKind) {
         (from.to_owned(), to.to_owned(), kind)
+    }
+
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
     }
 
     #[test]
@@ -243,5 +320,132 @@ mod tests {
         assert_eq!(build.dependencies("gamma").count(), 0);
         assert_eq!(build.dependents("alpha").count(), 0);
         assert!(build.edge_kinds("gamma", "alpha").is_none());
+    }
+
+    /// `a -> b -> c` plus `a -> c` and `d` with no edges.
+    fn chain() -> Graph {
+        Graph::new(
+            [
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+                edge("a", "c", DependencyKind::Normal),
+            ],
+        )
+    }
+
+    #[test]
+    fn reachable_follows_one_or_more_edges() {
+        let graph = chain();
+        assert_eq!(
+            graph.reachable("a"),
+            BTreeSet::from(["b".to_owned(), "c".to_owned()])
+        );
+        assert_eq!(graph.reachable("c"), BTreeSet::new());
+        assert_eq!(graph.reachable("d"), BTreeSet::new());
+        assert_eq!(graph.reachable("missing"), BTreeSet::new());
+    }
+
+    #[test]
+    fn a_cycle_makes_the_start_reachable_from_itself() {
+        let graph = Graph::new(
+            ["a".to_owned(), "b".to_owned()],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "a", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(
+            graph.reachable("a"),
+            BTreeSet::from(["a".to_owned(), "b".to_owned()])
+        );
+        let self_loop = Graph::new(["a".to_owned()], [edge("a", "a", DependencyKind::Normal)]);
+        assert_eq!(self_loop.reachable("a"), BTreeSet::from(["a".to_owned()]));
+    }
+
+    #[test]
+    fn paths_are_the_shortest_and_include_their_endpoints() {
+        let graph = chain();
+        assert_eq!(
+            graph.path("a", "c"),
+            Some(vec!["a".to_owned(), "c".to_owned()])
+        );
+        let deep = Graph::new(
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(
+            deep.path("a", "c"),
+            Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
+        );
+        assert_eq!(deep.path("c", "a"), None);
+        assert_eq!(deep.path("a", "missing"), None);
+        assert_eq!(deep.path("a", "a"), Some(vec!["a".to_owned()]));
+        assert_eq!(deep.path("missing", "missing"), None);
+    }
+
+    #[test]
+    fn cycles_have_a_closed_witness_path() {
+        let graph = Graph::new(
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "a", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+                edge("c", "b", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(graph.cycle_path("a"), Some(names(&["a", "b", "a"])));
+        assert_eq!(graph.cycle_path("b"), Some(names(&["b", "a", "b"])));
+        assert_eq!(graph.cycle_path("missing"), None);
+
+        let acyclic = layered();
+        assert_eq!(acyclic.cycle_path("core"), None);
+    }
+
+    #[test]
+    fn sorted_neighbors_choose_the_witness_path() {
+        let graph = Graph::new(
+            [
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
+            [
+                edge("a", "d", DependencyKind::Normal),
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+                edge("d", "c", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(
+            graph.path("a", "c"),
+            Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
+        );
+    }
+
+    /// `app -> facade -> core` plus an unconnected `tool`.
+    fn layered() -> Graph {
+        Graph::new(
+            [
+                "app".to_owned(),
+                "facade".to_owned(),
+                "core".to_owned(),
+                "tool".to_owned(),
+            ],
+            [
+                edge("app", "facade", DependencyKind::Normal),
+                edge("facade", "core", DependencyKind::Normal),
+            ],
+        )
     }
 }
