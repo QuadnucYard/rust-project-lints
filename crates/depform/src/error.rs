@@ -29,7 +29,8 @@ pub enum DepformError {
         /// The path that was looked at.
         path: PathBuf,
     },
-    /// The config parses as TOML but violates the schema.
+    /// The config cannot be used: it fails to parse as TOML, or it parses but
+    /// violates the schema.
     #[error("invalid depform.toml: {0}")]
     Config(String),
     /// The dependency graph cannot answer the requested query.

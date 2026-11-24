@@ -28,6 +28,16 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         manifest_path: Option<PathBuf>,
     },
+    /// Check the workspace against its `depform.toml`.
+    Check {
+        /// Manifest of the workspace to check; defaults to the current
+        /// directory.
+        #[arg(long, value_name = "PATH")]
+        manifest_path: Option<PathBuf>,
+        /// Config to read instead of `<workspace-root>/depform.toml`.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -42,6 +52,29 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(error),
         },
+        Command::Check {
+            manifest_path,
+            config,
+        } => match depform::check_workspace(manifest_path.as_deref(), config.as_deref()) {
+            Ok(violations) if violations.is_empty() => {
+                println!("depform check passed");
+                ExitCode::SUCCESS
+            }
+            Ok(violations) => {
+                eprint!("{}", depform::render_violations(&violations));
+                eprintln!("depform check failed: {}", render_count(violations.len()));
+                ExitCode::from(1)
+            }
+            Err(error) => fail(error),
+        },
+    }
+}
+
+/// Render a violation count with its singular or plural noun.
+fn render_count(total: usize) -> String {
+    match total {
+        1 => "1 violation".to_owned(),
+        total => format!("{total} violations"),
     }
 }
 

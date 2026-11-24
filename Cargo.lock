@@ -73,8 +73,10 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
+ "serde",
  "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

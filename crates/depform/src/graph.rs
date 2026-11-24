@@ -82,6 +82,29 @@ impl Graph {
             .insert(from.to_owned());
     }
 
+    /// A graph with the same packages and only edges of the selected kinds.
+    ///
+    /// Each edge keeps the intersection of its kind set with `kinds`, and an
+    /// edge that loses every kind disappears; packages always remain, because
+    /// a package without a selected declaration is still a member.
+    pub fn filtered(&self, kinds: &BTreeSet<DependencyKind>) -> Graph {
+        let mut graph = Self::with_packages(self.packages.iter().cloned());
+        for (from, to, edge_kinds) in self.edges() {
+            if edge_kinds.is_disjoint(kinds) {
+                continue;
+            }
+            graph.insert(from, to, edge_kinds.intersection(kinds).copied());
+        }
+        graph
+    }
+
+    /// The kinds of the edge `from -> to`, or `None` when the edge is absent.
+    pub(crate) fn edge_kinds(&self, from: &str, to: &str) -> Option<&BTreeSet<DependencyKind>> {
+        self.direct
+            .get(from)
+            .and_then(|neighbors| neighbors.get(to))
+    }
+
     /// The package names, sorted.
     pub fn packages(&self) -> impl Iterator<Item = &str> {
         self.packages.iter().map(String::as_str)
@@ -185,5 +208,40 @@ mod tests {
         let graph = Graph::new(packages, [edge("beta", "alpha", DependencyKind::Normal)]);
         assert_eq!(graph.package_count(), 2);
         assert_eq!(graph.packages().collect::<Vec<_>>(), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn filtering_keeps_packages_and_intersects_kinds() {
+        let graph = Graph::new(
+            ["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()],
+            [
+                edge("gamma", "alpha", DependencyKind::Normal),
+                edge("gamma", "alpha", DependencyKind::Dev),
+                edge("gamma", "beta", DependencyKind::Dev),
+            ],
+        );
+        let normal = graph.filtered(&BTreeSet::from([DependencyKind::Normal]));
+        assert_eq!(normal.package_count(), 3);
+        assert_eq!(normal.edge_count(), 1);
+        assert_eq!(normal.dependencies("gamma").collect::<Vec<_>>(), ["alpha"]);
+        assert_eq!(
+            normal.edge_kinds("gamma", "alpha"),
+            Some(&BTreeSet::from([DependencyKind::Normal]))
+        );
+
+        let dev = graph.filtered(&BTreeSet::from([DependencyKind::Dev]));
+        assert_eq!(dev.package_count(), 3);
+        assert_eq!(dev.edge_count(), 2);
+        assert_eq!(
+            dev.edge_kinds("gamma", "alpha"),
+            Some(&BTreeSet::from([DependencyKind::Dev]))
+        );
+
+        let build = graph.filtered(&BTreeSet::from([DependencyKind::Build]));
+        assert_eq!(build.package_count(), 3);
+        assert_eq!(build.edge_count(), 0);
+        assert_eq!(build.dependencies("gamma").count(), 0);
+        assert_eq!(build.dependents("alpha").count(), 0);
+        assert!(build.edge_kinds("gamma", "alpha").is_none());
     }
 }
