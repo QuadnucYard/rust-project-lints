@@ -14,7 +14,10 @@ use std::collections::BTreeSet;
 
 use crate::{
     Config, DepformError, Graph,
-    config::{NodeRule, PairRule, Range, RuleConfig, RuleKind, Selector, SetCheck, resolve_pairs},
+    config::{
+        GatewayCheck, NodeRule, PairRule, Range, RuleConfig, RuleKind, Selector, SetCheck,
+        resolve_pairs,
+    },
     graph::RootSearch,
     report::{Violation, render_kinds},
 };
@@ -99,6 +102,10 @@ fn check_node(
 /// Evaluate every pair check of one rule against its selected pairs.
 fn check_pair(view: &Graph, rule: &str, pair: &PairRule, violations: &mut Vec<Violation>) {
     let selection = format!("{{ from = {}, to = {} }}", pair.from, pair.to);
+    let gateway = pair
+        .path
+        .as_ref()
+        .map(|check| (check, check.through.resolve(view)));
     for (from, to) in resolve_pairs(&pair.from, &pair.to, view) {
         let report = PairReport {
             rule,
@@ -108,6 +115,9 @@ fn check_pair(view: &Graph, rule: &str, pair: &PairRule, violations: &mut Vec<Vi
         };
         if let Some(range) = &pair.distance {
             check_distance(view, range, &report, violations);
+        }
+        if let Some((check, gateways)) = &gateway {
+            check_path(view, gateways, check, &report, violations);
         }
     }
 }
@@ -298,6 +308,32 @@ fn check_distance(view: &Graph, range: &Range, pair: &PairReport, violations: &m
         },
         range.render(),
         path.map(|path| path.join(" -> ")),
+        violations,
+    );
+}
+
+/// Evaluate the `path` gateway check for one pair.
+///
+/// The check is "every path crosses a gateway", so an unreachable target — no
+/// path at all — passes, and a bypass path is the evidence of a violation.
+fn check_path(
+    view: &Graph,
+    gateways: &BTreeSet<String>,
+    check: &GatewayCheck,
+    pair: &PairReport,
+    violations: &mut Vec<Violation>,
+) {
+    let Some(bypass) = view.bypass_path(pair.from, pair.to, gateways) else {
+        return;
+    };
+    pair.fail(
+        format!(
+            "package `{}` has a path to `{}` that avoids the required gateway",
+            pair.from, pair.to
+        ),
+        format!("bypass {}", bypass.join(" -> ")),
+        format!("through {}", check.through),
+        None,
         violations,
     );
 }

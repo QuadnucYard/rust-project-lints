@@ -177,7 +177,7 @@ impl Graph {
         if from == to {
             return self.contains(from).then(|| vec![from.to_owned()]);
         }
-        self.search(from, to)
+        self.search(from, to, None)
     }
 
     /// A shortest cycle through `package`, with the package repeated at both
@@ -185,7 +185,7 @@ impl Graph {
     ///
     /// `None` means no path leads from the package back to itself.
     pub fn cycle_path(&self, package: &str) -> Option<Vec<String>> {
-        self.search(package, package)
+        self.search(package, package, None)
     }
 
     /// The shortest directed path length from `from` to `to`.
@@ -295,16 +295,42 @@ impl Graph {
         Ok(result)
     }
 
-    /// Breadth-first search for `to`.
+    /// A shortest path from `from` to `to` that avoids every gateway package.
+    ///
+    /// Gateways are skipped as intermediates, so a path exists here only when
+    /// it reaches `to` without passing through one. The endpoints are never
+    /// intermediates: a gateway equal to `from` or `to` does not block. `None`
+    /// means every path crosses a gateway, or `to` is unreachable.
+    pub fn bypass_path(
+        &self,
+        from: &str,
+        to: &str,
+        gateways: &BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        if from == to {
+            return None;
+        }
+        self.search(from, to, Some(gateways))
+    }
+
+    /// Breadth-first search for `to`, skipping gateways as intermediates.
     ///
     /// The start is seeded as visited, so a search towards the start itself
     /// only succeeds by leaving it and returning, which is exactly a cycle.
-    fn search(&self, from: &str, to: &str) -> Option<Vec<String>> {
+    fn search(
+        &self,
+        from: &str,
+        to: &str,
+        gateways: Option<&BTreeSet<String>>,
+    ) -> Option<Vec<String>> {
         let mut parents: BTreeMap<String, Option<String>> =
             BTreeMap::from([(from.to_owned(), None)]);
         let mut queue = VecDeque::from([from.to_owned()]);
         while let Some(node) = queue.pop_front() {
             for next in self.dependencies(&node) {
+                if next != to && gateways.is_some_and(|gateways| gateways.contains(next)) {
+                    continue;
+                }
                 if next == to {
                     let mut path = trail(&parents, &node);
                     path.push(to.to_owned());
@@ -740,6 +766,70 @@ mod tests {
         assert_eq!(
             graph.height("missing").expect_err("an unknown package"),
             "package `missing` is not in the graph"
+        );
+    }
+
+    #[test]
+    fn bypass_paths_avoid_every_gateway() {
+        // `app -> facade -> core` and a direct `app -> core`.
+        let graph = Graph::new(
+            ["app".to_owned(), "facade".to_owned(), "core".to_owned()],
+            [
+                edge("app", "facade", DependencyKind::Normal),
+                edge("app", "core", DependencyKind::Normal),
+                edge("facade", "core", DependencyKind::Normal),
+            ],
+        );
+        let gateways = BTreeSet::from(["facade".to_owned()]);
+        assert_eq!(
+            graph.bypass_path("app", "core", &gateways),
+            Some(names(&["app", "core"]))
+        );
+
+        let gated = Graph::new(
+            ["app".to_owned(), "facade".to_owned(), "core".to_owned()],
+            [
+                edge("app", "facade", DependencyKind::Normal),
+                edge("facade", "core", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(gated.bypass_path("app", "core", &gateways), None);
+        assert_eq!(gated.bypass_path("core", "app", &gateways), None);
+        assert_eq!(gated.bypass_path("app", "app", &gateways), None);
+    }
+
+    #[test]
+    fn a_gateway_at_an_endpoint_does_not_block() {
+        let graph = Graph::new(
+            ["app".to_owned(), "core".to_owned()],
+            [edge("app", "core", DependencyKind::Normal)],
+        );
+        let source = BTreeSet::from(["app".to_owned()]);
+        assert_eq!(
+            graph.bypass_path("app", "core", &source),
+            Some(names(&["app", "core"]))
+        );
+        let target = BTreeSet::from(["core".to_owned()]);
+        assert_eq!(
+            graph.bypass_path("app", "core", &target),
+            Some(names(&["app", "core"]))
+        );
+    }
+
+    #[test]
+    fn bypass_search_terminates_on_cycles() {
+        let graph = Graph::new(
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            [
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "a", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+            ],
+        );
+        let gateways = BTreeSet::new();
+        assert_eq!(
+            graph.bypass_path("a", "c", &gateways),
+            Some(names(&["a", "b", "c"]))
         );
     }
 }

@@ -111,7 +111,7 @@ fn check_keys_populate_their_fields() {
              check.dependency-count.exact = 3\n\
              check.dependent-count.min = 4\n\n\
              [rules.pair]\nselect.from = \"a\"\nselect.to = \"b\"\n\
-             check.distance.exact = 2\n",
+             check.distance.exact = 2\ncheck.path.through = \"c\"\n",
     )
     .expect("a valid config");
     let rule = |name: &str| {
@@ -162,6 +162,10 @@ fn check_keys_populate_their_fields() {
         pair.distance.as_ref().map(Range::render),
         Some("exact 2".to_owned())
     );
+    assert_eq!(
+        pair.path.as_ref().map(|check| check.through.to_string()),
+        Some("\"c\"".to_owned())
+    );
 }
 
 #[test]
@@ -209,6 +213,13 @@ fn pair_selectors_are_rejected_inside_checks() {
                 "`{key}`"
             );
     }
+    assert!(
+        error(
+            "[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\n\
+                 check.path.through = { from = \"a\", to = \"b\" }\n"
+        )
+        .contains("a pair selector is not allowed here")
+    );
 }
 
 #[test]
@@ -270,5 +281,39 @@ fn pair_checks_need_pair_selectors_and_do_not_mix() {
                  check.distance.exact = 1\ncheck.depth.max = 1\n"
         )
         .contains("cannot mix node checks and pair checks")
+    );
+}
+
+#[test]
+fn path_checks_need_a_gateway_and_a_pair_selector() {
+    let config = Config::from_toml(
+        "[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\n\
+             check.path.through = \"gateway\"\n",
+    )
+    .expect("a valid config");
+    let rule = config.rules()[0].pair_rule();
+    assert_eq!(
+        rule.path.as_ref().map(|check| check.through.to_string()),
+        Some("\"gateway\"".to_owned())
+    );
+
+    assert!(
+        error(
+            "[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\n\
+                 check.path.nope = \"gateway\"\n"
+        )
+        .contains("unknown path check key `nope`")
+    );
+    assert!(
+        error("[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\ncheck.path = {}\n")
+            .contains("needs a `through` selector")
+    );
+    assert!(
+        error("[rules.r]\nselect = \"a\"\ncheck.path.through = \"gateway\"\n")
+            .contains("needs a pair selector")
+    );
+    assert!(
+        error("[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\ncheck.path = 1\n")
+            .contains("a path check must be a table")
     );
 }

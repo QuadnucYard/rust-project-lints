@@ -159,6 +159,7 @@ pub(crate) struct PairRule {
     pub(crate) from: Selector,
     pub(crate) to: Selector,
     pub(crate) distance: Option<Range>,
+    pub(crate) path: Option<GatewayCheck>,
 }
 
 impl RuleConfig {
@@ -182,6 +183,9 @@ impl RuleConfig {
             RuleKind::Pair(rule) => {
                 rule.from.validate_explicit(graph, &self.name)?;
                 rule.to.validate_explicit(graph, &self.name)?;
+                if let Some(check) = &rule.path {
+                    check.through.validate_explicit(graph, &self.name)?;
+                }
                 Ok(())
             }
         }
@@ -228,6 +232,7 @@ impl RuleConfig {
             from,
             to,
             distance: None,
+            path: None,
         };
         edit(&mut rule);
         Self {
@@ -276,6 +281,37 @@ impl SetCheck {
     /// Whether the check asserts nothing.
     fn is_empty(&self) -> bool {
         self.allow.is_none() && self.deny.is_none() && self.require.is_none()
+    }
+}
+
+/// The `path` check: every path between a pair must cross `through`.
+#[derive(Debug)]
+pub(crate) struct GatewayCheck {
+    pub(crate) through: Selector,
+}
+
+impl GatewayCheck {
+    fn parse(rule: &str, value: &Value, groups: &Groups) -> Result<Self, DepformError> {
+        let table = value
+            .as_table()
+            .ok_or_else(|| rule_error(rule, "a path check must be a table"))?;
+        let mut through = None;
+        for (key, value) in table {
+            let slot = match key.as_str() {
+                "through" => &mut through,
+                other => {
+                    return Err(rule_error(
+                        rule,
+                        format!("unknown path check key `{other}`"),
+                    ));
+                }
+            };
+            *slot = Some(parse_selector(rule, value, groups)?);
+        }
+        let Some(through) = through else {
+            return Err(rule_error(rule, "a path check needs a `through` selector"));
+        };
+        Ok(Self { through })
     }
 }
 
@@ -419,6 +455,7 @@ impl RuleConfig {
                     from,
                     to,
                     distance: checks.distance,
+                    path: checks.path,
                 })
             }
         };
@@ -439,6 +476,7 @@ struct Checks {
     dependency_count: Option<Range>,
     dependent_count: Option<Range>,
     distance: Option<Range>,
+    path: Option<GatewayCheck>,
 }
 
 impl Checks {
@@ -461,6 +499,7 @@ impl Checks {
                     checks.dependent_count = Some(parse_range(name, "dependent-count", value)?);
                 }
                 "distance" => checks.distance = Some(parse_range(name, "distance", value)?),
+                "path" => checks.path = Some(GatewayCheck::parse(name, value, groups)?),
                 other => return Err(rule_error(name, format!("unknown check `{other}`"))),
             }
         }
@@ -479,7 +518,7 @@ impl Checks {
 
     /// Pair checks apply to an ordered pair of packages.
     fn has_pair(&self) -> bool {
-        self.distance.is_some()
+        self.distance.is_some() || self.path.is_some()
     }
 }
 

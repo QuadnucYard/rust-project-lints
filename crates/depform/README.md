@@ -148,8 +148,8 @@ check.distance.exact = 2
 A pair selector names a `from` and a `to` name selector and yields every
 ordered pair except a package paired with itself. A rule holding a pair
 selector may only carry pair checks, and a pair check needs a pair selector.
-Pair selectors are only valid as a rule's `select`: `allow`, `deny` and
-`require` take name selectors.
+Pair selectors are only valid as a rule's `select`: `allow`, `deny`, `require`
+and `through` take name selectors.
 
 `distance` is the shortest directed path length between the two packages:
 
@@ -163,6 +163,24 @@ Pair selectors are only valid as a rule's `select`: `allow`, `deny` and
 An unreachable pair has no distance, so `min` passes it while `max` and `exact`
 fail it with `observed: unreachable`. A violation lists `from` and `to`
 separately and names a witness path such as `app -> facade -> core`.
+
+### Gateway paths
+
+```toml
+[rules.app-through-facade]
+select.from = "app"
+select.to = "@core"
+check.path.through = "@facade"
+```
+
+`path` asserts that *every* path from `from` to `to` passes through at least
+one package of `through`. An unreachable pair has no path and therefore
+passes, and the endpoints never count as intermediates, so a gateway equal to
+`from` or `to` gates nothing. A violation names the shortest path that avoids
+the gateway: `observed: bypass app -> core`.
+
+`distance` and `path` may appear in the same rule; per pair, `distance` is
+evaluated first.
 
 ### Selectors
 

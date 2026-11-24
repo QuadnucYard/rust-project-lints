@@ -842,6 +842,89 @@ fn pair_selections_iterate_in_sorted_pair_order() {
     assert_eq!(value(&violations[1], "witness"), "other -> facade -> core");
 }
 
+/// `app -> facade -> core` plus a direct `app -> core` that skips the
+/// gateway.
+fn bypass_graph() -> Graph {
+    Graph::new(
+        names(&["app", "facade", "core"]),
+        [
+            edge("app", "facade", DependencyKind::Normal),
+            edge("facade", "core", DependencyKind::Normal),
+            edge("app", "core", DependencyKind::Normal),
+        ],
+    )
+}
+
+#[test]
+fn a_bypass_path_is_reported() {
+    let rule = pair_with("r", "app", "core", |rule| {
+        rule.path = Some(GatewayCheck {
+            through: sel("facade"),
+        });
+    });
+    let config = Config::from_rules(vec![rule]);
+
+    // Without the direct edge, every path crosses the gateway.
+    let gated = Graph::new(
+        names(&["app", "facade", "core"]),
+        [
+            edge("app", "facade", DependencyKind::Normal),
+            edge("facade", "core", DependencyKind::Normal),
+        ],
+    );
+    assert!(check_graph(&gated, &config).expect("a check").is_empty());
+
+    let violations = check_graph(&bypass_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "package `app` has a path to `core` that avoids the required gateway"
+    );
+    assert_eq!(
+        keys(&violations[0]),
+        ["selection", "from", "to", "observed", "expected"]
+    );
+    assert_eq!(value(&violations[0], "observed"), "bypass app -> core");
+    assert_eq!(value(&violations[0], "expected"), "through \"facade\"");
+}
+
+#[test]
+fn distance_and_path_are_evaluated_in_order() {
+    let rule = pair_with("r", "app", "core", |rule| {
+        rule.distance = Some(Range::exact(2));
+        rule.path = Some(GatewayCheck {
+            through: sel("facade"),
+        });
+    });
+    let config = Config::from_rules(vec![rule]);
+    let violations = check_graph(&bypass_graph(), &config).expect("a check");
+    let messages: Vec<&str> = violations.iter().map(Violation::message).collect();
+    assert_eq!(
+        messages,
+        [
+            "distance from `app` to `core` is out of range",
+            "package `app` has a path to `core` that avoids the required gateway",
+        ]
+    );
+    assert_eq!(value(&violations[0], "observed"), "distance 1");
+    assert_eq!(value(&violations[1], "observed"), "bypass app -> core");
+}
+
+#[test]
+fn a_stale_gateway_selector_is_a_config_error() {
+    let rule = pair_with("r", "app", "core", |rule| {
+        rule.path = Some(GatewayCheck {
+            through: sel("gone"),
+        });
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&layered_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("rule `r`"), "{error}");
+    assert!(error.contains("\"gone\""), "{error}");
+}
+
 #[test]
 fn a_stale_pair_end_is_a_config_error() {
     let rule = pair_with("r", "app", "gone", |rule| {
