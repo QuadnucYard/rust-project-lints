@@ -31,7 +31,8 @@ enum PatternKind {
     Suffix,
 }
 
-/// One allow/deny pattern for the `qualified-name` policy.
+/// One allow/deny pattern for the `qualified-name` and `expect-over-allow`
+/// policies.
 ///
 /// `Pattern::from_spelling("P::*")` builds a prefix pattern matching any
 /// canonical spelling beginning `P::`; `Pattern::from_spelling("*::P")`
@@ -72,14 +73,25 @@ impl Pattern {
         }
     }
 
-    /// Whether the canonical spelling of a candidate path matches this pattern.
-    fn matches(&self, spelled: &str) -> bool {
+    /// Whether the canonical spelling of the candidate matches this pattern.
+    pub(crate) fn matches(&self, spelled: &str) -> bool {
         match self.kind {
             PatternKind::Exact => spelled == self.text,
             PatternKind::Prefix => spelled.starts_with(&self.text),
             PatternKind::Suffix => spelled.ends_with(&self.text),
         }
     }
+}
+
+/// Build one policy's pattern list from the whitelist or blacklist spellings
+/// deserialized out of a config section. `"P::*"` entries become prefix
+/// patterns, `"*::P"` entries suffix patterns, and anything else an exact
+/// spelling; an unsupported spelling is a hard [`ConfigError`].
+pub(crate) fn parse_patterns(spellings: &[String]) -> Result<Vec<Pattern>, ConfigError> {
+    spellings
+        .iter()
+        .map(|spelling| Pattern::from_spelling(spelling))
+        .collect()
 }
 
 /// Reject a pattern's path part unless it is a supported form: non-empty,
@@ -147,21 +159,12 @@ impl QualifiedNamePolicy {
     }
 
     /// Build the policy from the `[qualified-name]` spellings deserialized out
-    /// of the one style config. `"P::*"` entries become prefix patterns,
-    /// `"*::P"` entries suffix patterns, and anything else an exact spelling;
-    /// an unsupported spelling is a hard [`ConfigError`].
+    /// of the one style config; an unsupported spelling is a hard
+    /// [`ConfigError`].
     pub fn from_lists(whitelist: Vec<String>, blacklist: Vec<String>) -> Result<Self, ConfigError> {
-        let whitelist = whitelist
-            .iter()
-            .map(|spelling| Pattern::from_spelling(spelling))
-            .collect::<Result<Vec<_>, _>>()?;
-        let blacklist = blacklist
-            .iter()
-            .map(|spelling| Pattern::from_spelling(spelling))
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            whitelist,
-            blacklist,
+            whitelist: parse_patterns(&whitelist)?,
+            blacklist: parse_patterns(&blacklist)?,
             external_crates: BTreeSet::new(),
         })
     }
@@ -180,9 +183,20 @@ pub fn check_qualified_names(
         return Vec::new();
     };
     let tokens: Vec<TokenTree> = stream.into_iter().collect();
+    check_qualified_tokens(path, text, policy, &tokens)
+}
+
+/// [`check_qualified_names`] over a token stream the caller already parsed, so
+/// a whole-file check tokenizes each source once.
+pub(crate) fn check_qualified_tokens(
+    path: &str,
+    text: &str,
+    policy: &QualifiedNamePolicy,
+    tokens: &[TokenTree],
+) -> Vec<Violation> {
     let mut found = Vec::new();
     scan_pairs(
-        &tokens,
+        tokens,
         &mut VecDeque::new(),
         &mut RunState::default(),
         path,
@@ -228,6 +242,14 @@ fn is_use_start(prev: &VecDeque<PrevKind>) -> bool {
     }
 }
 
+/// Token-generating macros whose bodies are templates, not authored code.
+pub(crate) const TEMPLATE_MACROS: &[&str] = &[
+    "quote",
+    "quote_spanned",
+    "parse_quote",
+    "parse_quote_spanned",
+];
+
 /// A group is a macro template body — and out of `qualified-name` scope — only
 /// for a declarative macro definition or a known token-generating template
 /// macro. Ordinary macro invocation arguments remain usage positions and are
@@ -236,10 +258,7 @@ fn is_macro_template(prev: &VecDeque<PrevKind>) -> bool {
     let tokens: Vec<&PrevKind> = prev.iter().collect();
     match tokens.as_slice() {
         [.., PrevKind::Ident(name), PrevKind::Punct('!')]
-            if matches!(
-                name.as_str(),
-                "quote" | "quote_spanned" | "parse_quote" | "parse_quote_spanned"
-            ) =>
+            if TEMPLATE_MACROS.contains(&name.as_str()) =>
         {
             true
         }

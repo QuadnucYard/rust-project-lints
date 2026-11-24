@@ -1,7 +1,7 @@
 # Style rules
 
 `cargo-stylecheck` is the executable and authoritative description of the
-layout rules it enforces: Rust source layout, Cargo manifest layout and TOML
+layout rules it enforces: Rust source, Cargo manifest layout and TOML
 file format. Run it from the tree root; reports go to the standard error
 stream in `codespan-reporting` style — an `error[...]` or `warning[...]`
 header carrying the rule's severity, a `path:line:column` locus, the
@@ -20,7 +20,7 @@ failure.
 ## Rule registry
 
 Rules are grouped by what they inspect. A rule id is its group letter followed
-by the rule's 1-based ordinal inside the group — `S` source layout, `M` Cargo
+by the rule's 1-based ordinal inside the group — `S` Rust source, `M` Cargo
 manifest layout, `T` TOML file format. Reports print the id with the rule's
 canonical name (`error[S1 module-doc-spacing]: …`, or `warning[…]` once the
 rule is downgraded), and that canonical name is also the section key of a rule
@@ -42,11 +42,11 @@ tolerated, so a newer config can carry a section an older checker does not
 know. An unknown top-level scalar or array is not a section and is rejected;
 an empty `exempt-paths` entry is rejected because it would exempt every file.
 
-### Source layout — S
+### Rust source — S
 
 - **`S1` `module-doc-spacing`.** A contiguous module-level `//!` block is
   followed by exactly one blank line before the next item. Inner attributes
-  (`#![doc = …]`, `#![allow(…)]`, …) and plain `//` comments under the docs
+  (`#![doc = …]`, `#![expect(…)]`, …) and plain `//` comments under the docs
   belong to the same module header and do not count as that item. Paths
   listed in the top-level `exempt-paths` array are skipped, which is how
   standalone trybuild programs under `tests/ui/` stay exempt: their doc
@@ -82,6 +82,30 @@ an empty `exempt-paths` entry is rejected because it would exempt every file.
   `#[cfg(test)] mod tests { … }` block and an in-place `pub mod prelude { … }`
   may follow the items they serve. Only unindented items are observed; nested
   items live inside an inline module or a function body.
+- **`S6` `expect-over-allow`.** A lint escape hatch is written with
+  `#[expect(…)]` (or `#![expect(…)]` as an inner attribute), not
+  `#[allow(…)]`; an expectation that no longer suppresses anything is
+  reported as `unfulfilled_lint_expectations`, so a stale escape hatch cannot
+  linger. The rule reports every `allow` attribute among the authored tokens —
+  on items, statements, expressions and fields alike, inner `#![…]` included —
+  and every `allow` nested in a `#[cfg_attr(…)]` attribute list; the report
+  underlines the named `allow` meta. Template bodies are exempt: a
+  `macro_rules! …` definition or a known token-generating macro (`quote!`,
+  `quote_spanned!`, `parse_quote!`, `parse_quote_spanned!`) cannot know whether
+  the lint fires at each expansion site. Ordinary macro invocation bodies are
+  authored tokens and are scanned. Three lint names remain `allow`-only by
+  default because `expect` cannot serve their purpose:
+  `unfulfilled_lint_expectations` is defined to fire even when expected, while
+  `unknown_lints` and `renamed_and_removed_lints` must tolerate lint names that
+  another supported compiler version does not know. An `allow` whose lint list
+  contains only allowed names is accepted; a mixed list is reported so the
+  portable guard can be split onto its own `allow`. The rule reads its
+  `[expect-over-allow]` table: `whitelist` and `blacklist` arrays of lint-name
+  spellings, where `"P::*"` is a prefix match, `"*::P"` a suffix match, and
+  anything else exact. Precedence is whitelist > blacklist > built-in
+  allow-only set > report; a missing section is valid, and an invalid spelling
+  is a hard config error. Unlike `module-doc-spacing` and `qualified-name`,
+  this rule is not skipped by `exempt-paths`.
 
 ### Cargo manifest layout — M
 

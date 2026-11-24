@@ -2,15 +2,17 @@
 //!
 //! [`Rule`] is the registry: the `rules!` declaration groups the rules by
 //! category and carries every rule's id, canonical name, default level and
-//! short report text. [`Rule::ALL`] lists the rules in report order: source
-//! layout (`S`), Cargo manifest layout (`M`), then TOML file format (`T`).
+//! short report text. [`Rule::ALL`] lists the rules in report order: Rust
+//! source (`S`), Cargo manifest layout (`M`), then TOML file format (`T`).
 
+mod expect;
 mod manifest;
 mod qualified;
 mod source;
 mod toml;
 mod workspace;
 
+pub use expect::ExpectOverAllowPolicy;
 pub use manifest::check_manifest_with_workspace_members;
 pub use qualified::{Pattern, QualifiedNamePolicy, check_qualified_names};
 pub use source::check_rust_source;
@@ -36,7 +38,8 @@ pub enum Level {
 /// the group starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RuleGroup {
-    /// Source layout (`S`): item and reference placement inside a Rust file.
+    /// Rust source (`S`): item, reference and lint-attribute placement inside
+    /// a Rust file.
     Source,
     /// Cargo manifest layout (`M`): sections and dependency tables.
     Manifest,
@@ -201,6 +204,8 @@ rules! {
             => "qualified reference spells a module path; import the type and use its bare name, or whitelist the spelling in stylecheck.toml",
         S5: ModBeforeUse("mod-before-use") = Error
             => "file-module declarations (`mod name;`) must precede every `use` item",
+        S6: ExpectOverAllow("expect-over-allow") = Error
+            => "prefer `#[expect(...)]` over `#[allow(...)]` so a stale lint escape hatch is reported",
     }
 
     Manifest {

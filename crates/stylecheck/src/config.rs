@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::rules::{Level, QualifiedNamePolicy, Rule};
+use crate::rules::{ExpectOverAllowPolicy, Level, QualifiedNamePolicy, Rule};
 
 /// Configuration parse failure; reported as a hard error by the command.
 #[derive(Debug, Error)]
@@ -55,7 +55,9 @@ struct StyleFile {
     #[serde(default)]
     levels: BTreeMap<String, String>,
     #[serde(rename = "qualified-name", default)]
-    qualified: QualifiedTable,
+    qualified: PolicyTable,
+    #[serde(rename = "expect-over-allow", default)]
+    expect_over_allow: PolicyTable,
     #[serde(rename = "dependency-group-order", default)]
     dependency_group_order: DependencyGroupOrderTable,
     /// Top-level keys the schema does not know. A table (or a non-empty array
@@ -65,12 +67,12 @@ struct StyleFile {
     unknown: BTreeMap<String, toml::Value>,
 }
 
-/// The `[qualified-name]` section: canonical spellings the `qualified-name`
-/// rule allows or re-denies. `"P::*"` is a prefix pattern; anything else is
-/// exact.
+/// The `[qualified-name]` and `[expect-over-allow]` sections share this shape:
+/// canonical spellings the rule allows or re-denies. `"P::*"` is a prefix
+/// pattern, `"*::P"` a suffix pattern; anything else is exact.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct QualifiedTable {
+struct PolicyTable {
     whitelist: Vec<String>,
     blacklist: Vec<String>,
 }
@@ -195,7 +197,8 @@ impl DependencyAspect {
 
 /// One config carrying every style rule's options, parsed from the
 /// `stylecheck.toml` at the scanned root. The `qualified-name` rule's options
-/// live in the `[qualified-name]` section; the top-level `exempt-paths` array
+/// live in the `[qualified-name]` section and the `expect-over-allow` rule's in
+/// the `[expect-over-allow]` section; the top-level `exempt-paths` array
 /// lists the paths the path-sensitive rules skip; `scan-paths` lists the trees
 /// the walk descends into; `[[dependency-group-order.aspects]]` declares the
 /// root dependency aspects in their required order; the `[levels]` map
@@ -207,6 +210,7 @@ pub struct StyleConfig {
     exempt_paths: Vec<String>,
     levels: BTreeMap<Rule, Level>,
     qualified: QualifiedNamePolicy,
+    expect_over_allow: ExpectOverAllowPolicy,
     aspects: Vec<DependencyAspect>,
 }
 
@@ -217,6 +221,7 @@ impl Default for StyleConfig {
             exempt_paths: Vec::new(),
             levels: BTreeMap::new(),
             qualified: QualifiedNamePolicy::default(),
+            expect_over_allow: ExpectOverAllowPolicy::default(),
             aspects: Vec::new(),
         }
     }
@@ -242,6 +247,10 @@ impl StyleConfig {
         }
         let qualified =
             QualifiedNamePolicy::from_lists(file.qualified.whitelist, file.qualified.blacklist)?;
+        let expect_over_allow = ExpectOverAllowPolicy::from_lists(
+            file.expect_over_allow.whitelist,
+            file.expect_over_allow.blacklist,
+        )?;
         let levels = file
             .levels
             .iter()
@@ -268,6 +277,7 @@ impl StyleConfig {
             exempt_paths: file.exempt_paths,
             levels,
             qualified,
+            expect_over_allow,
             aspects,
         })
     }
@@ -285,6 +295,11 @@ impl StyleConfig {
     /// The `qualified-name` rule's allow/deny policy.
     pub fn qualified(&self) -> &QualifiedNamePolicy {
         &self.qualified
+    }
+
+    /// The `expect-over-allow` rule's lint-name allow/deny policy.
+    pub fn expect_over_allow(&self) -> &ExpectOverAllowPolicy {
+        &self.expect_over_allow
     }
 
     /// The severity `rule` reports with: its configured level, else the
@@ -429,5 +444,40 @@ paths = ["crates/beta/", "crates/shared/"]
         // `path.contains("")` is always true, so an empty fragment would
         // silently exempt every source file from the path-sensitive rules.
         assert!(StyleConfig::from_toml("exempt-paths = [\"\"]\n").is_err());
+    }
+
+    #[test]
+    fn expect_over_allow_config_parses_and_validates() {
+        let config = StyleConfig::from_toml(
+            "[expect-over-allow]\nwhitelist = [\"dead_code\", \"clippy::*\"]\nblacklist = [\"clippy::pedantic\"]\n",
+        )
+        .expect("the expect-over-allow policy parses");
+        let policy = config.expect_over_allow();
+        assert!(policy.allows("dead_code"));
+        // The built-in allow-only set stays in force by default.
+        assert!(policy.allows("unknown_lints"));
+        // The whitelist wins over the blacklist.
+        assert!(policy.allows("clippy::pedantic"));
+        // Anything unmatched is reported.
+        assert!(!policy.allows("dead_code_ish"));
+
+        // A blacklist re-denies a name from the built-in allow-only set.
+        let config = StyleConfig::from_toml(
+            "[expect-over-allow]\nwhitelist = [\"dead_code\"]\nblacklist = [\"unknown_lints\"]\n",
+        )
+        .expect("the expect-over-allow policy parses");
+        assert!(!config.expect_over_allow().allows("unknown_lints"));
+
+        // An empty, whitespace-carrying or misplaced-wildcard spelling is a
+        // hard error, exactly as in the `[qualified-name]` table, and so is a
+        // misspelled key inside the known section.
+        for text in [
+            "[expect-over-allow]\nwhitelist = [\"\"]\n",
+            "[expect-over-allow]\nwhitelist = [\"bad name\"]\n",
+            "[expect-over-allow]\nblacklist = [\"a*b\"]\n",
+            "[expect-over-allow]\nwhite-list = [\"dead_code\"]\n",
+        ] {
+            assert!(StyleConfig::from_toml(text).is_err(), "{text:?}");
+        }
     }
 }

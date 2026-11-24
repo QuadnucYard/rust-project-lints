@@ -1,23 +1,43 @@
-//! Source-layout rules.
+//! Source rules.
 
 use std::collections::BTreeSet;
 
 use proc_macro2::{TokenStream, TokenTree};
 
-use crate::{Rule, StyleConfig, Violation, rules::qualified::check_qualified_names};
+use crate::{
+    Rule, StyleConfig, Violation,
+    rules::{expect::check_allow_attributes, qualified::check_qualified_tokens},
+};
 
-/// Check one Rust source file against the source layout rules. A path the
-/// config exempts skips the rules that read a file as authored source
-/// (`module-doc-spacing` and `qualified-name`); the structural rules still
-/// apply.
+/// Check one Rust source file against the source rules. A path the config
+/// exempts skips the rules that read a file as authored source
+/// (`module-doc-spacing` and `qualified-name`); the structural rules and
+/// `expect-over-allow` still apply.
 pub fn check_rust_source(path: &str, text: &str, config: &StyleConfig) -> Vec<Violation> {
+    // One tokenization serves every token-based rule; a file that does not
+    // tokenize has nothing to inspect and is skipped by them.
+    let tokens: Vec<TokenTree> = text
+        .parse::<TokenStream>()
+        .map(|stream| stream.into_iter().collect())
+        .unwrap_or_default();
     let mut found = Vec::new();
     if !config.is_exempt(path) {
-        found.extend(check_module_doc_spacing(path, text));
-        found.extend(check_qualified_names(path, text, config.qualified()));
+        found.extend(check_module_doc_spacing(path, text, &tokens));
+        found.extend(check_qualified_tokens(
+            path,
+            text,
+            config.qualified(),
+            &tokens,
+        ));
     }
     found.extend(check_test_mod_spacing(path, text));
     found.extend(check_mod_before_use(path, text));
+    found.extend(check_allow_attributes(
+        path,
+        text,
+        &tokens,
+        config.expect_over_allow(),
+    ));
     found
 }
 
@@ -25,15 +45,10 @@ pub fn check_rust_source(path: &str, text: &str, config: &StyleConfig) -> Vec<Vi
 /// inner attributes (`#![doc = …]` among them) and plain `//` comments that
 /// follow them — must be followed by exactly one blank line before the next
 /// item.
-fn check_module_doc_spacing(path: &str, text: &str) -> Vec<Violation> {
-    // Parse the source for attribute extents so a multi-line inner attribute
-    // joins the header as a whole. A file without inner attributes needs no
-    // token pass, and an untokenizable file keeps the line-based fallback.
-    let attribute_lines = if text.contains("#![") {
-        inner_attribute_lines(text)
-    } else {
-        BTreeSet::new()
-    };
+fn check_module_doc_spacing(path: &str, text: &str, tokens: &[TokenTree]) -> Vec<Violation> {
+    // The shared token stream knows the extent of every inner attribute, so a
+    // multi-line one joins the header as a whole.
+    let attribute_lines = inner_attribute_lines(tokens);
     let mut found = Vec::new();
     let mut last_doc: Option<usize> = None;
     for (index, line) in text.lines().enumerate() {
@@ -68,28 +83,21 @@ fn is_header_line(trimmed: &str) -> bool {
 /// token stream knows where the attribute's bracket group ends, including
 /// strings and nested brackets, so each continuation line can join the module
 /// header instead of looking like the first item.
-fn inner_attribute_lines(text: &str) -> BTreeSet<usize> {
-    let Ok(stream) = text.parse::<TokenStream>() else {
-        return BTreeSet::new();
-    };
-    let mut tokens = stream.into_iter().peekable();
+fn inner_attribute_lines(tokens: &[TokenTree]) -> BTreeSet<usize> {
     let mut lines = BTreeSet::new();
-    while let Some(token) = tokens.next() {
-        let TokenTree::Punct(hash) = token else {
-            continue;
-        };
-        if hash.as_char() != '#'
-            || !matches!(tokens.peek(), Some(TokenTree::Punct(bang)) if bang.as_char() == '!')
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, TokenTree::Punct(punct) if punct.as_char() == '#')
+            || !matches!(
+                tokens.get(index + 1),
+                Some(TokenTree::Punct(bang)) if bang.as_char() == '!'
+            )
         {
             continue;
         }
-        tokens.next();
-        let Some(TokenTree::Group(group)) = tokens.next() else {
+        let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
             continue;
         };
-        let start = group.span_open().start().line;
-        let end = group.span_close().end().line;
-        lines.extend(start..=end);
+        lines.extend(group.span_open().start().line..=group.span_close().end().line);
     }
     lines
 }
@@ -248,13 +256,13 @@ mod tests {
     fn inner_attributes_join_the_module_doc_block() {
         for clean in [
             "//! Docs.\n#![doc = include_str!(\"../README.md\")]\n\nuse std::fmt;\n",
-            "//! Docs.\n#![allow(dead_code)]\n#![warn(missing_docs)]\n\nuse std::fmt;\n",
-            "//! Docs.\n#![allow(\n    dead_code,\n)]\n\nuse std::fmt;\n",
+            "//! Docs.\n#![expect(dead_code)]\n#![warn(missing_docs)]\n\nuse std::fmt;\n",
+            "//! Docs.\n#![expect(\n    dead_code,\n)]\n\nuse std::fmt;\n",
             "//! Docs.\n#![doc = r#\"\nSome text\n\"#]\n\nuse std::fmt;\n",
-            "//! Docs.\n\n#![allow(dead_code)]\n\nuse std::fmt;\n",
+            "//! Docs.\n\n#![expect(dead_code)]\n\nuse std::fmt;\n",
             // Without a `//!` block an attribute opens nothing and is not checked.
             "#![doc = include_str!(\"../README.md\")]\n#![warn(missing_docs)]\n\nuse std::fmt;\n",
-            "#![allow(dead_code)]\nuse std::fmt;\n",
+            "#![expect(dead_code)]\nuse std::fmt;\n",
         ] {
             assert!(check("src/lib.rs", clean).is_empty(), "{clean:?}");
         }
@@ -264,9 +272,9 @@ mod tests {
                 "//! Docs.\n#![doc = include_str!(\"../README.md\")]\nuse std::fmt;\n",
                 3,
             ),
-            ("//! Docs.\n#![allow(dead_code)]\n\n\nuse std::fmt;\n", 5),
+            ("//! Docs.\n#![expect(dead_code)]\n\n\nuse std::fmt;\n", 5),
             (
-                "//! Docs.\n#![allow(\n    dead_code,\n)]\nuse std::fmt;\n",
+                "//! Docs.\n#![expect(\n    dead_code,\n)]\nuse std::fmt;\n",
                 5,
             ),
         ] {
@@ -282,7 +290,7 @@ mod tests {
         for clean in [
             "//! Docs.\n// A note.\n\nuse std::fmt;\n",
             "//! Docs.\n// One note.\n// Another note.\n\nuse std::fmt;\n",
-            "//! Docs.\n#![allow(dead_code)]\n// A note.\n\nuse std::fmt;\n",
+            "//! Docs.\n#![expect(dead_code)]\n// A note.\n\nuse std::fmt;\n",
             // A `///` doc comment stays with the item below it.
             "//! Docs.\n\n/// Item docs.\npub fn f() {}\n",
             "// Without `//!` docs a comment opens no block.\nuse std::fmt;\n",
@@ -325,6 +333,12 @@ mod tests {
         let found = check_rust_source("tests/ui/fail_x.rs", unstructured, &config);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].rule, Rule::TestModBlankAfterAttribute);
+        // `expect-over-allow` is not exempt either: a compile-fail fixture
+        // must spell its escape hatch as an expectation like authored code.
+        let escape = "#[allow(dead_code)]\nfn f() {}\n";
+        let found = check_rust_source("tests/ui/fail_x.rs", escape, &config);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, Rule::ExpectOverAllow);
         // Without the exemption the same file is checked like any other.
         assert_eq!(check("tests/ui/fail_x.rs", text).len(), 2);
     }
