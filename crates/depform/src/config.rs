@@ -135,6 +135,8 @@ pub(crate) struct RuleConfig {
 /// What a rule asserts, which fixes the shape of its selection.
 #[derive(Debug)]
 pub(crate) enum RuleKind {
+    /// The graph-level acyclicity check.
+    Acyclic,
     /// Checks that apply to one package at a time.
     Node(Box<NodeRule>),
     /// Checks that apply to ordered pairs of packages.
@@ -171,6 +173,7 @@ impl RuleConfig {
     /// Reject every explicit selector of the rule that matches no package.
     pub(crate) fn validate(&self, graph: &Graph) -> Result<(), DepformError> {
         match &self.kind {
+            RuleKind::Acyclic => Ok(()),
             RuleKind::Node(rule) => {
                 rule.select.validate_explicit(graph, &self.name)?;
                 for check in [&rule.dependencies, &rule.reachable].into_iter().flatten() {
@@ -238,6 +241,14 @@ impl RuleConfig {
         Self {
             name: name.to_owned(),
             kind: RuleKind::Pair(rule),
+        }
+    }
+
+    /// The graph-level acyclic rule.
+    pub(crate) fn acyclic(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            kind: RuleKind::Acyclic,
         }
     }
 
@@ -413,9 +424,24 @@ impl RuleConfig {
             }
             None => None,
         };
-        let kind = match select {
-            None => return Err(rule_error(name, "the rule needs a `select` selector")),
-            Some(Select::Node(select)) => {
+        let kind = match (select, checks.acyclic) {
+            (None, true) => {
+                if checks.has_node() || checks.has_pair() {
+                    return Err(rule_error(
+                        name,
+                        "an acyclic rule cannot be combined with other checks",
+                    ));
+                }
+                RuleKind::Acyclic
+            }
+            (Some(_), true) => {
+                return Err(rule_error(
+                    name,
+                    "an acyclic rule must not have a `select` selector",
+                ));
+            }
+            (None, false) => return Err(rule_error(name, "the rule needs a `select` selector")),
+            (Some(Select::Node(select)), false) => {
                 if checks.has_pair() {
                     return Err(rule_error(
                         name,
@@ -435,7 +461,7 @@ impl RuleConfig {
                     dependent_count: checks.dependent_count,
                 }))
             }
-            Some(Select::Pair { from, to }) => {
+            (Some(Select::Pair { from, to }), false) => {
                 if checks.has_node() && checks.has_pair() {
                     return Err(rule_error(
                         name,
@@ -477,6 +503,7 @@ struct Checks {
     dependent_count: Option<Range>,
     distance: Option<Range>,
     path: Option<GatewayCheck>,
+    acyclic: bool,
 }
 
 impl Checks {
@@ -500,6 +527,7 @@ impl Checks {
                 }
                 "distance" => checks.distance = Some(parse_range(name, "distance", value)?),
                 "path" => checks.path = Some(GatewayCheck::parse(name, value, groups)?),
+                "acyclic" => checks.acyclic = parse_acyclic(name, value)?,
                 other => return Err(rule_error(name, format!("unknown check `{other}`"))),
             }
         }
@@ -519,6 +547,18 @@ impl Checks {
     /// Pair checks apply to an ordered pair of packages.
     fn has_pair(&self) -> bool {
         self.distance.is_some() || self.path.is_some()
+    }
+}
+
+/// Parse the graph-level `acyclic` switch, which only accepts `true`.
+fn parse_acyclic(rule: &str, value: &Value) -> Result<bool, DepformError> {
+    match value.as_bool() {
+        Some(true) => Ok(true),
+        Some(false) => Err(rule_error(
+            rule,
+            "`acyclic` must be `true`; drop the check to allow cycles",
+        )),
+        None => Err(rule_error(rule, "`acyclic` must be a boolean")),
     }
 }
 

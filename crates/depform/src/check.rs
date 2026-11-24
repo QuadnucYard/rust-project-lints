@@ -39,6 +39,18 @@ pub fn check_graph(graph: &Graph, config: &Config) -> Result<Vec<Violation>, Dep
     let mut violations = Vec::new();
     for rule in config.rules() {
         match &rule.kind {
+            RuleKind::Acyclic => {
+                for cycle in view.cycles() {
+                    violations.push(Violation::new(
+                        rule.name.as_str(),
+                        "packages form a dependency cycle",
+                        vec![
+                            detail("observed", format!("cycle packages {}", cycle.join(", "))),
+                            detail("expected", "acyclic"),
+                        ],
+                    ));
+                }
+            }
             RuleKind::Node(node) => {
                 check_node(
                     &view,

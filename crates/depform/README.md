@@ -182,6 +182,20 @@ the gateway: `observed: bypass app -> core`.
 `distance` and `path` may appear in the same rule; per pair, `distance` is
 evaluated first.
 
+### Acyclic graphs
+
+```toml
+[rules.acyclic]
+check.acyclic = true
+```
+
+An `acyclic` rule is the one graph-level check: it has no `select`, cannot be
+combined with any other check, and only accepts `true`. It reports one
+violation per strongly connected component with at least two members, or a
+single package with a self-edge, listing the component's members sorted. Only
+the selected dependency kinds count, so a cycle made of `dev` edges passes
+while `dependency-kinds = ["normal"]`.
+
 ### Selectors
 
 A selector is a string: a package name, or a pattern where `*` matches any run

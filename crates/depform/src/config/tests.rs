@@ -111,7 +111,8 @@ fn check_keys_populate_their_fields() {
              check.dependency-count.exact = 3\n\
              check.dependent-count.min = 4\n\n\
              [rules.pair]\nselect.from = \"a\"\nselect.to = \"b\"\n\
-             check.distance.exact = 2\ncheck.path.through = \"c\"\n",
+             check.distance.exact = 2\ncheck.path.through = \"c\"\n\n\
+             [rules.graph]\ncheck.acyclic = true\n",
     )
     .expect("a valid config");
     let rule = |name: &str| {
@@ -166,6 +167,9 @@ fn check_keys_populate_their_fields() {
         pair.path.as_ref().map(|check| check.through.to_string()),
         Some("\"c\"".to_owned())
     );
+
+    let graph = rule("graph");
+    assert!(matches!(graph.kind, RuleKind::Acyclic));
 }
 
 #[test]
@@ -315,5 +319,23 @@ fn path_checks_need_a_gateway_and_a_pair_selector() {
     assert!(
         error("[rules.r]\nselect.from = \"a\"\nselect.to = \"b\"\ncheck.path = 1\n")
             .contains("a path check must be a table")
+    );
+}
+
+#[test]
+fn acyclic_rules_are_graph_level_only() {
+    let config =
+        Config::from_toml("[rules.acyclic]\ncheck.acyclic = true\n").expect("a valid config");
+    assert!(matches!(config.rules()[0].kind, RuleKind::Acyclic));
+
+    assert!(error("[rules.r]\ncheck.acyclic = false\n").contains("must be `true`"));
+    assert!(error("[rules.r]\ncheck.acyclic = \"yes\"\n").contains("must be a boolean"));
+    assert!(
+        error("[rules.r]\nselect = \"a\"\ncheck.acyclic = true\n")
+            .contains("must not have a `select` selector")
+    );
+    assert!(
+        error("[rules.r]\ncheck.acyclic = true\ncheck.depth.max = 1\n")
+            .contains("cannot be combined with other checks")
     );
 }

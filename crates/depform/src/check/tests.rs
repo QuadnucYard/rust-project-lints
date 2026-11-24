@@ -911,6 +911,34 @@ fn distance_and_path_are_evaluated_in_order() {
 }
 
 #[test]
+fn a_cycle_is_reported_with_its_component() {
+    let config = Config::from_rules(vec![RuleConfig::acyclic("acyclic")]);
+    assert!(
+        check_graph(&layered_graph(), &config)
+            .expect("a check")
+            .is_empty()
+    );
+
+    let graph = Graph::new(
+        names(&["app", "facade", "core", "tool"]),
+        [
+            edge("app", "facade", DependencyKind::Normal),
+            edge("facade", "core", DependencyKind::Normal),
+            edge("core", "app", DependencyKind::Normal),
+        ],
+    );
+    let violations = check_graph(&graph, &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].message(), "packages form a dependency cycle");
+    assert_eq!(keys(&violations[0]), ["observed", "expected"]);
+    assert_eq!(
+        value(&violations[0], "observed"),
+        "cycle packages app, core, facade"
+    );
+    assert_eq!(value(&violations[0], "expected"), "acyclic");
+}
+
+#[test]
 fn a_stale_gateway_selector_is_a_config_error() {
     let rule = pair_with("r", "app", "core", |rule| {
         rule.path = Some(GatewayCheck {

@@ -295,6 +295,58 @@ impl Graph {
         Ok(result)
     }
 
+    /// The strongly connected components that form a cycle, sorted.
+    ///
+    /// A component is reported when it has at least two members or a self
+    /// edge. Members are sorted inside a component and components are sorted
+    /// against each other, so the report is stable.
+    pub fn cycles(&self) -> Vec<Vec<String>> {
+        let mut visited = BTreeSet::new();
+        let mut order = Vec::new();
+        for package in &self.packages {
+            if !visited.contains(package) {
+                self.finish_order(package, &mut visited, &mut order);
+            }
+        }
+        let mut assigned = BTreeSet::new();
+        let mut cycles = Vec::new();
+        for package in order.into_iter().rev() {
+            if !assigned.insert(package.clone()) {
+                continue;
+            }
+            let mut component = vec![package.clone()];
+            let mut stack = vec![package];
+            while let Some(node) = stack.pop() {
+                for previous in self.dependents(&node) {
+                    if assigned.insert(previous.to_owned()) {
+                        component.push(previous.to_owned());
+                        stack.push(previous.to_owned());
+                    }
+                }
+            }
+            component.sort();
+            let self_loop =
+                component.len() == 1 && self.edge_kinds(&component[0], &component[0]).is_some();
+            if component.len() > 1 || self_loop {
+                cycles.push(component);
+            }
+        }
+        cycles.sort();
+        cycles
+    }
+
+    /// Post-order depth-first search over `dependencies` for Kosaraju's first
+    /// pass.
+    fn finish_order(&self, package: &str, visited: &mut BTreeSet<String>, order: &mut Vec<String>) {
+        visited.insert(package.to_owned());
+        for next in self.dependencies(package) {
+            if !visited.contains(next) {
+                self.finish_order(next, visited, order);
+            }
+        }
+        order.push(package.to_owned());
+    }
+
     /// A shortest path from `from` to `to` that avoids every gateway package.
     ///
     /// Gateways are skipped as intermediates, so a path exists here only when
@@ -831,5 +883,56 @@ mod tests {
             graph.bypass_path("a", "c", &gateways),
             Some(names(&["a", "b", "c"]))
         );
+    }
+
+    #[test]
+    fn acyclic_graphs_report_no_cycles() {
+        assert!(layered().cycles().is_empty());
+        let diamond = Graph::new(
+            names(&["app", "left", "right", "core"]),
+            [
+                edge("app", "left", DependencyKind::Normal),
+                edge("app", "right", DependencyKind::Normal),
+                edge("left", "core", DependencyKind::Normal),
+                edge("right", "core", DependencyKind::Normal),
+            ],
+        );
+        assert!(diamond.cycles().is_empty());
+    }
+
+    #[test]
+    fn cycles_report_sorted_components() {
+        let two = Graph::new(
+            names(&["a", "b", "c"]),
+            [
+                edge("b", "a", DependencyKind::Normal),
+                edge("a", "b", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(two.cycles(), [names(&["a", "b"])]);
+
+        let three = Graph::new(
+            names(&["a", "b", "c"]),
+            [
+                edge("c", "a", DependencyKind::Normal),
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(three.cycles(), [names(&["a", "b", "c"])]);
+
+        let self_loop = Graph::new(names(&["a", "b"]), [edge("a", "a", DependencyKind::Normal)]);
+        assert_eq!(self_loop.cycles(), [names(&["a"])]);
+
+        let disjoint = Graph::new(
+            names(&["a", "b", "c", "d", "e"]),
+            [
+                edge("b", "a", DependencyKind::Normal),
+                edge("a", "b", DependencyKind::Normal),
+                edge("d", "c", DependencyKind::Normal),
+                edge("c", "d", DependencyKind::Normal),
+            ],
+        );
+        assert_eq!(disjoint.cycles(), [names(&["a", "b"]), names(&["c", "d"])]);
     }
 }
