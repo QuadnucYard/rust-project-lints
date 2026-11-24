@@ -1,5 +1,5 @@
 use super::*;
-use crate::{DependencyKind, config::RuleConfig};
+use crate::DependencyKind;
 
 fn names(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
@@ -431,4 +431,190 @@ fn a_union_is_validated_entry_by_entry() {
         .expect_err("a config error")
         .to_string();
     assert!(error.contains("gone*"), "{error}");
+}
+
+/// `app -> facade -> core`, plus an unconnected `tool`.
+fn layered_graph() -> Graph {
+    Graph::new(
+        names(&["app", "facade", "core", "tool"]),
+        [
+            edge("app", "facade", DependencyKind::Normal),
+            edge("facade", "core", DependencyKind::Normal),
+        ],
+    )
+}
+
+#[test]
+fn depth_reports_the_offending_value_and_witness() {
+    let rule = node_with("r", "core", |rule| {
+        rule.depth = Some(Range::max(1));
+    });
+    let config = Config::from_rules(vec![rule]).with_roots(["app"]);
+    let violations = check_graph(&layered_graph(), &config).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "depth of package `core` is out of range"
+    );
+    assert_eq!(
+        keys(&violations[0]),
+        ["selection", "package", "observed", "expected", "witness"]
+    );
+    assert_eq!(value(&violations[0], "observed"), "depth 2");
+    assert_eq!(value(&violations[0], "expected"), "max 1");
+    assert_eq!(
+        value(&violations[0], "witness"),
+        "app (0) -> facade (1) -> core (2)"
+    );
+}
+
+#[test]
+fn unreachable_packages_pass_a_lower_bound_and_fail_a_cap() {
+    let lower_rule = node_with("r", "tool", |rule| {
+        rule.depth = Some(Range::min(1));
+    });
+    let lower = Config::from_rules(vec![lower_rule]).with_roots(["app"]);
+    assert!(
+        check_graph(&layered_graph(), &lower)
+            .expect("a check")
+            .is_empty()
+    );
+
+    let cap_rule = node_with("r", "tool", |rule| {
+        rule.depth = Some(Range::max(1));
+    });
+    let cap = Config::from_rules(vec![cap_rule]).with_roots(["app"]);
+    let violations = check_graph(&layered_graph(), &cap).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(value(&violations[0], "observed"), "unreachable");
+    assert_eq!(
+        keys(&violations[0]),
+        ["selection", "package", "observed", "expected"]
+    );
+
+    let exact_rule = node_with("r", "tool", |rule| {
+        rule.depth = Some(Range::exact(0));
+    });
+    let exact = Config::from_rules(vec![exact_rule]).with_roots(["app"]);
+    assert_eq!(
+        check_graph(&layered_graph(), &exact)
+            .expect("a check")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn roots_are_inferred_from_packages_without_dependents() {
+    let shallow = node_with("r", "app", |rule| {
+        rule.depth = Some(Range::exact(0));
+    });
+    let roots = Config::from_rules(vec![shallow]);
+    assert!(
+        check_graph(&layered_graph(), &roots)
+            .expect("a check")
+            .is_empty()
+    );
+    let deep_rule = node_with("r", "core", |rule| {
+        rule.depth = Some(Range::max(1));
+    });
+    let deep = Config::from_rules(vec![deep_rule]);
+    let violations = check_graph(&layered_graph(), &deep).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(value(&violations[0], "observed"), "depth 2");
+}
+
+#[test]
+fn a_cyclic_view_without_roots_is_a_graph_error() {
+    let graph = Graph::new(
+        names(&["a", "b"]),
+        [
+            edge("a", "b", DependencyKind::Normal),
+            edge("b", "a", DependencyKind::Normal),
+        ],
+    );
+    let rule = node_with("r", "a", |rule| {
+        rule.depth = Some(Range::max(1));
+    });
+    let config = Config::from_rules(vec![rule]);
+    let error = check_graph(&graph, &config)
+        .expect_err("a graph error")
+        .to_string();
+    assert!(error.contains("declare `[graph] roots`"), "{error}");
+
+    let counted_rule = node_with("r", "a", |rule| {
+        rule.dependency_count = Some(Range::max(1));
+    });
+    let counted = Config::from_rules(vec![counted_rule]);
+    assert!(check_graph(&graph, &counted).expect("a check").is_empty());
+}
+
+#[test]
+fn declared_roots_are_validated_even_without_a_depth_rule() {
+    let rule = node_with("r", "app", |rule| {
+        rule.dependency_count = Some(Range::max(5));
+    });
+    let config = Config::from_rules(vec![rule]).with_roots(["app", "missing"]);
+    let error = check_graph(&app_graph(), &config)
+        .expect_err("a config error")
+        .to_string();
+    assert!(error.contains("missing"), "{error}");
+}
+
+#[test]
+fn degree_checks_count_distinct_neighbors_in_the_view() {
+    let graph = Graph::new(
+        names(&["app", "core", "dev-only"]),
+        [
+            edge("app", "core", DependencyKind::Normal),
+            edge("app", "dev-only", DependencyKind::Dev),
+        ],
+    );
+    let one_rule = node_with("r", "app", |rule| {
+        rule.dependency_count = Some(Range::exact(1));
+    });
+    let one = Config::from_rules(vec![one_rule]);
+    assert!(check_graph(&graph, &one).expect("a check").is_empty());
+    let two_rule = node_with("r", "app", |rule| {
+        rule.dependency_count = Some(Range::exact(2));
+    });
+    let two = Config::from_rules(vec![two_rule])
+        .with_kinds([DependencyKind::Normal, DependencyKind::Dev]);
+    assert!(check_graph(&graph, &two).expect("a check").is_empty());
+
+    let dependents_rule = node_with("r", "core", |rule| {
+        rule.dependent_count = Some(Range::exact(1));
+    });
+    let dependents = Config::from_rules(vec![dependents_rule]);
+    assert!(
+        check_graph(&graph, &dependents)
+            .expect("a check")
+            .is_empty()
+    );
+
+    let capped_rule = node_with("r", "core", |rule| {
+        rule.dependent_count = Some(Range::max(0));
+    });
+    let capped = Config::from_rules(vec![capped_rule]);
+    let violations = check_graph(&graph, &capped).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "dependent count of package `core` is out of range"
+    );
+    assert_eq!(value(&violations[0], "observed"), "dependent count 1");
+    assert_eq!(value(&violations[0], "expected"), "max 0");
+
+    let dependencies_rule = node_with("r", "app", |rule| {
+        rule.dependency_count = Some(Range::min(2));
+    });
+    let dependencies = Config::from_rules(vec![dependencies_rule]);
+    let violations = check_graph(&graph, &dependencies).expect("a check");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(
+        violations[0].message(),
+        "dependency count of package `app` is out of range"
+    );
+    assert_eq!(value(&violations[0], "observed"), "dependency count 1");
+    assert_eq!(value(&violations[0], "expected"), "min 2");
 }

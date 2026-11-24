@@ -188,6 +188,57 @@ impl Graph {
         self.search(package, package)
     }
 
+    /// The shortest distance from any root to every package, roots included.
+    ///
+    /// A package no root reaches has no depth. Roots and neighbors are visited
+    /// in sorted order, so the first parent the search records — and with it
+    /// every witness path — is deterministic.
+    pub fn depths(&self, roots: &[String]) -> BTreeMap<String, Option<usize>> {
+        self.root_search(roots).depths
+    }
+
+    /// The witness path from a closest root to `package`, root first.
+    pub fn depth_path(&self, roots: &[String], package: &str) -> Option<Vec<String>> {
+        self.root_search(roots).path(package)
+    }
+
+    /// Multi-source breadth-first search from `roots`.
+    pub(crate) fn root_search(&self, roots: &[String]) -> RootSearch {
+        let mut depths: BTreeMap<String, Option<usize>> = self
+            .packages
+            .iter()
+            .map(|package| (package.clone(), None))
+            .collect();
+        let mut parents = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        let mut sorted: Vec<&String> = roots.iter().collect();
+        sorted.sort();
+        for root in sorted {
+            if let Some(slot) = depths.get_mut(root)
+                && slot.is_none()
+            {
+                *slot = Some(0);
+                parents.insert(root.clone(), None);
+                queue.push_back(root.clone());
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            let Some(depth) = depths.get(&node).copied().flatten() else {
+                continue;
+            };
+            for package in self.dependencies(&node) {
+                if let Some(slot) = depths.get_mut(package)
+                    && slot.is_none()
+                {
+                    *slot = Some(depth + 1);
+                    parents.insert(package.to_owned(), Some(node.clone()));
+                    queue.push_back(package.to_owned());
+                }
+            }
+        }
+        RootSearch { depths, parents }
+    }
+
     /// Breadth-first search for `to`.
     ///
     /// The start is seeded as visited, so a search towards the start itself
@@ -211,6 +262,25 @@ impl Graph {
             }
         }
         None
+    }
+}
+
+/// The depths and parent links of one multi-source breadth-first search.
+pub(crate) struct RootSearch {
+    pub(crate) depths: BTreeMap<String, Option<usize>>,
+    parents: BTreeMap<String, Option<String>>,
+}
+
+impl RootSearch {
+    /// The depth of `package`, if a root reaches it.
+    pub(crate) fn depth(&self, package: &str) -> Option<usize> {
+        self.depths.get(package).copied().flatten()
+    }
+
+    /// The witness path from the closest root to `package`, root first.
+    pub(crate) fn path(&self, package: &str) -> Option<Vec<String>> {
+        self.depth(package)?;
+        Some(trail(&self.parents, package))
     }
 }
 
@@ -447,5 +517,81 @@ mod tests {
                 edge("facade", "core", DependencyKind::Normal),
             ],
         )
+    }
+
+    #[test]
+    fn depths_measure_the_shortest_distance_from_any_root() {
+        let graph = layered();
+        let roots = ["app".to_owned()];
+        let depths = graph.depths(&roots);
+        assert_eq!(depths.len(), 4);
+        assert_eq!(depths["app"], Some(0));
+        assert_eq!(depths["facade"], Some(1));
+        assert_eq!(depths["core"], Some(2));
+        assert_eq!(depths["tool"], None);
+        assert_eq!(
+            graph.depth_path(&roots, "core"),
+            Some(vec![
+                "app".to_owned(),
+                "facade".to_owned(),
+                "core".to_owned(),
+            ])
+        );
+        assert_eq!(
+            graph.depth_path(&roots, "app"),
+            Some(vec!["app".to_owned()])
+        );
+        assert_eq!(graph.depth_path(&roots, "tool"), None);
+        assert_eq!(graph.depth_path(&roots, "missing"), None);
+    }
+
+    #[test]
+    fn several_roots_share_one_search() {
+        let graph = Graph::new(
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            [
+                edge("a", "c", DependencyKind::Normal),
+                edge("b", "c", DependencyKind::Normal),
+            ],
+        );
+        let depths = graph.depths(&["b".to_owned(), "a".to_owned()]);
+        assert_eq!(depths["a"], Some(0));
+        assert_eq!(depths["b"], Some(0));
+        assert_eq!(depths["c"], Some(1));
+        assert_eq!(
+            graph.depth_path(&["b".to_owned(), "a".to_owned()], "c"),
+            Some(vec!["a".to_owned(), "c".to_owned()])
+        );
+    }
+
+    #[test]
+    fn roots_outside_the_graph_contribute_nothing() {
+        let graph = layered();
+        let depths = graph.depths(&["missing".to_owned()]);
+        assert!(depths.values().all(Option::is_none));
+    }
+
+    #[test]
+    fn the_first_sorted_parent_wins_a_tie() {
+        let graph = Graph::new(
+            [
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
+            [
+                edge("a", "c", DependencyKind::Normal),
+                edge("a", "b", DependencyKind::Normal),
+                edge("b", "d", DependencyKind::Normal),
+                edge("c", "d", DependencyKind::Normal),
+            ],
+        );
+        let roots = ["a".to_owned()];
+        assert_eq!(graph.depths(&roots)["d"], Some(2));
+        assert_eq!(
+            graph.depth_path(&roots, "d"),
+            Some(vec!["a".to_owned(), "b".to_owned(), "d".to_owned()])
+        );
     }
 }

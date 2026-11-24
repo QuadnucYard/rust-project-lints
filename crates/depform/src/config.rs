@@ -5,9 +5,10 @@
 //! expression languages whose errors must name the offending rule, and because
 //! every unknown key below the skeleton is rejected here as a hard error.
 //!
-//! The selector sub-language lives in [`selector`]; this module owns the
+//! The sub-languages live in [`selector`] and [`range`]; this module owns the
 //! document, rule structure and file loading.
 
+mod range;
 mod selector;
 
 #[cfg(test)]
@@ -23,8 +24,8 @@ use std::{
 use serde::Deserialize;
 use toml::{Table, Value};
 
-pub(crate) use self::selector::Selector;
 use self::selector::{Groups, Select};
+pub(crate) use self::{range::Range, selector::Selector};
 use crate::{DependencyKind, DepformError, Graph};
 
 /// A parsed and validated `depform.toml`.
@@ -77,6 +78,11 @@ impl Config {
     pub(crate) fn rules(&self) -> &[RuleConfig] {
         &self.rules
     }
+
+    /// The declared roots, or `None` when they are inferred from the view.
+    pub(crate) fn roots(&self) -> Option<&[String]> {
+        self.graph.roots.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +96,7 @@ impl Config {
         Self {
             graph: GraphSettings {
                 kinds: BTreeSet::from([DependencyKind::Normal]),
+                roots: None,
             },
             rules,
         }
@@ -100,12 +107,19 @@ impl Config {
         self.graph.kinds = kinds.into_iter().collect();
         self
     }
+
+    /// Declare the roots depth is measured from.
+    pub(crate) fn with_roots(mut self, roots: impl IntoIterator<Item = &'static str>) -> Self {
+        self.graph.roots = Some(roots.into_iter().map(str::to_owned).collect());
+        self
+    }
 }
 
 /// The `[graph]` table: which declaration kinds form the checked view.
 #[derive(Debug)]
 struct GraphSettings {
     kinds: BTreeSet<DependencyKind>,
+    roots: Option<Vec<String>>,
 }
 
 /// One `[rules.NAME]` table.
@@ -128,9 +142,17 @@ pub(crate) struct NodeRule {
     pub(crate) select: Selector,
     pub(crate) dependencies: Option<SetCheck>,
     pub(crate) reachable: Option<SetCheck>,
+    pub(crate) depth: Option<Range>,
+    pub(crate) dependency_count: Option<Range>,
+    pub(crate) dependent_count: Option<Range>,
 }
 
 impl RuleConfig {
+    /// Whether the rule needs the depth search rooted at the graph roots.
+    pub(crate) fn needs_roots(&self) -> bool {
+        matches!(&self.kind, RuleKind::Node(rule) if rule.depth.is_some())
+    }
+
     /// Reject every explicit selector of the rule that matches no package.
     pub(crate) fn validate(&self, graph: &Graph) -> Result<(), DepformError> {
         match &self.kind {
@@ -164,6 +186,9 @@ impl RuleConfig {
             select,
             dependencies: None,
             reachable: None,
+            depth: None,
+            dependency_count: None,
+            dependent_count: None,
         };
         edit(&mut rule);
         Self {
@@ -221,6 +246,7 @@ struct ConfigFile {
 struct GraphFile {
     #[serde(rename = "dependency-kinds")]
     dependency_kinds: Option<Vec<String>>,
+    roots: Option<Vec<String>>,
 }
 
 /// One rule as written: the selector and the check table are still untyped.
@@ -263,7 +289,25 @@ impl GraphSettings {
                 kinds
             }
         };
-        Ok(Self { kinds })
+        let roots = match &file.roots {
+            None => None,
+            Some(roots) => {
+                if roots.is_empty() {
+                    return Err(config_error("[graph] roots must name at least one package"));
+                }
+                let mut seen = BTreeSet::new();
+                for root in roots {
+                    if root.is_empty() {
+                        return Err(config_error("[graph] roots must not name an empty package"));
+                    }
+                    if !seen.insert(root) {
+                        return Err(config_error(format!("[graph] roots repeats `{root}`")));
+                    }
+                }
+                Some(roots.clone())
+            }
+        };
+        Ok(Self { kinds, roots })
     }
 }
 
@@ -295,6 +339,9 @@ impl RuleConfig {
                     select,
                     dependencies: checks.dependencies,
                     reachable: checks.reachable,
+                    depth: checks.depth,
+                    dependency_count: checks.dependency_count,
+                    dependent_count: checks.dependent_count,
                 }))
             }
         };
@@ -310,6 +357,9 @@ impl RuleConfig {
 struct Checks {
     dependencies: Option<SetCheck>,
     reachable: Option<SetCheck>,
+    depth: Option<Range>,
+    dependency_count: Option<Range>,
+    dependent_count: Option<Range>,
 }
 
 impl Checks {
@@ -323,6 +373,13 @@ impl Checks {
                 "reachable" => {
                     checks.reachable = Some(SetCheck::parse(name, "reachable", value, groups)?);
                 }
+                "depth" => checks.depth = Some(parse_range(name, "depth", value)?),
+                "dependency-count" => {
+                    checks.dependency_count = Some(parse_range(name, "dependency-count", value)?);
+                }
+                "dependent-count" => {
+                    checks.dependent_count = Some(parse_range(name, "dependent-count", value)?);
+                }
                 other => return Err(rule_error(name, format!("unknown check `{other}`"))),
             }
         }
@@ -331,7 +388,11 @@ impl Checks {
 
     /// Node checks apply to one package at a time.
     fn has_node(&self) -> bool {
-        self.dependencies.is_some() || self.reachable.is_some()
+        self.dependencies.is_some()
+            || self.reachable.is_some()
+            || self.depth.is_some()
+            || self.dependency_count.is_some()
+            || self.dependent_count.is_some()
     }
 }
 
@@ -377,6 +438,11 @@ impl SetCheck {
 /// Parse a selector value in the context of one rule.
 fn parse_selector(rule: &str, value: &Value, groups: &Groups) -> Result<Selector, DepformError> {
     Selector::parse(value, groups).map_err(|detail| rule_error(rule, detail))
+}
+
+/// Parse a range value in the context of one rule and check key.
+fn parse_range(rule: &str, key: &str, value: &Value) -> Result<Range, DepformError> {
+    Range::parse(value).map_err(|detail| rule_error(rule, format!("`{key}`: {detail}")))
 }
 
 /// Build a config error that names one rule.

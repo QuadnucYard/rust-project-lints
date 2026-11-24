@@ -105,7 +105,10 @@ fn check_keys_populate_their_fields() {
     let config = Config::from_toml(
         "[rules.node]\nselect = \"a\"\n\
              check.dependencies.deny = \"b\"\n\
-             check.reachable.require = \"c\"\n",
+             check.reachable.require = \"c\"\n\
+             check.depth.min = 1\n\
+             check.dependency-count.exact = 3\n\
+             check.dependent-count.min = 4\n",
     )
     .expect("a valid config");
     let node = config.rules()[0].node_rule();
@@ -123,6 +126,18 @@ fn check_keys_populate_their_fields() {
             .and_then(|check| check.require.as_ref())
             .map(ToString::to_string),
         Some("\"c\"".to_owned())
+    );
+    assert_eq!(
+        node.depth.as_ref().map(Range::render),
+        Some("min 1".to_owned())
+    );
+    assert_eq!(
+        node.dependency_count.as_ref().map(Range::render),
+        Some("exact 3".to_owned())
+    );
+    assert_eq!(
+        node.dependent_count.as_ref().map(Range::render),
+        Some("min 4".to_owned())
     );
 }
 
@@ -158,4 +173,34 @@ fn rule_names_use_the_identifier_alphabet() {
 #[test]
 fn group_tables_are_validated_while_parsing() {
     assert!(error("[groups]\ncore = []\n").contains("at least one pattern"));
+}
+
+#[test]
+fn roots_are_optional_but_validated() {
+    assert!(error("[graph]\nroots = []\n").contains("at least one package"));
+    assert!(error("[graph]\nroots = [\"a\", \"a\"]\n").contains("repeats `a`"));
+    assert!(error("[graph]\nroots = [\"\"]\n").contains("empty package"));
+    assert!(error("[graph]\nroots = \"a\"\n").contains("expected a sequence"));
+
+    let config = Config::from_toml(
+        "[graph]\nroots = [\"b\", \"a\"]\n\n\
+             [rules.r]\nselect = \"a\"\ncheck.depth.min = 0\n",
+    )
+    .expect("a valid config");
+    assert_eq!(
+        config.roots(),
+        Some(["b".to_owned(), "a".to_owned()].as_slice())
+    );
+
+    let inferred = Config::from_toml("[rules.r]\nselect = \"a\"\ncheck.depth.min = 0\n")
+        .expect("a valid config");
+    assert_eq!(inferred.roots(), None);
+}
+
+#[test]
+fn range_errors_name_the_check() {
+    assert!(
+        error("[rules.r]\nselect = \"a\"\ncheck.depth = {}\n")
+            .contains("`depth`: a range needs at least one")
+    );
 }

@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 
 use crate::{
     Config, DepformError, Graph,
-    config::{NodeRule, RuleKind, Selector, SetCheck},
+    config::{NodeRule, Range, RuleConfig, RuleKind, Selector, SetCheck},
+    graph::RootSearch,
     report::{Violation, render_kinds},
 };
 
@@ -27,17 +28,36 @@ pub fn check_graph(graph: &Graph, config: &Config) -> Result<Vec<Violation>, Dep
     for rule in config.rules() {
         rule.validate(&view)?;
     }
+    let needs_roots = config.rules().iter().any(RuleConfig::needs_roots);
+    let roots = resolve_roots(&view, config, needs_roots)?;
+    let depth_view = roots.map(|roots| DepthView {
+        search: view.root_search(&roots),
+    });
     let mut violations = Vec::new();
     for rule in config.rules() {
         match &rule.kind {
-            RuleKind::Node(node) => check_node(&view, &rule.name, node, &mut violations),
+            RuleKind::Node(node) => {
+                check_node(
+                    &view,
+                    depth_view.as_ref(),
+                    &rule.name,
+                    node,
+                    &mut violations,
+                );
+            }
         }
     }
     Ok(violations)
 }
 
 /// Evaluate every node check of one rule against its selected packages.
-fn check_node(view: &Graph, rule: &str, node: &NodeRule, violations: &mut Vec<Violation>) {
+fn check_node(
+    view: &Graph,
+    depth_view: Option<&DepthView>,
+    rule: &str,
+    node: &NodeRule,
+    violations: &mut Vec<Violation>,
+) {
     let selection = node.select.to_string();
     let dependencies = node
         .dependencies
@@ -59,7 +79,59 @@ fn check_node(view: &Graph, rule: &str, node: &NodeRule, violations: &mut Vec<Vi
         if let Some(sets) = &reachable {
             check_sets(view, SetKind::Reachable, sets, &report, violations);
         }
+        if let (Some(range), Some(depth_view)) = (&node.depth, depth_view) {
+            check_depth(depth_view, range, &report, violations);
+        }
+        if let Some(range) = &node.dependency_count {
+            check_count(view, CountKind::Dependencies, range, &report, violations);
+        }
+        if let Some(range) = &node.dependent_count {
+            check_count(view, CountKind::Dependents, range, &report, violations);
+        }
     }
+}
+
+/// The roots depth is measured from: the declared ones, or inferred.
+///
+/// Declared roots are validated against the view whether or not a rule needs
+/// them. Inference only runs when a rule checks `depth`; an inferred set that
+/// is empty means every package has a dependent, which no depth can describe.
+fn resolve_roots(
+    view: &Graph,
+    config: &Config,
+    needed: bool,
+) -> Result<Option<Vec<String>>, DepformError> {
+    if let Some(roots) = config.roots() {
+        for root in roots {
+            if !view.contains(root) {
+                return Err(DepformError::Config(format!(
+                    "[graph] roots names `{root}`, which is not a package in the graph"
+                )));
+            }
+        }
+        return Ok(Some(roots.to_vec()));
+    }
+    if !needed {
+        return Ok(None);
+    }
+    let inferred: Vec<String> = view
+        .packages()
+        .filter(|package| view.dependents(package).next().is_none())
+        .map(str::to_owned)
+        .collect();
+    if inferred.is_empty() {
+        return Err(DepformError::Graph(
+            "no package is free of dependents, so no root can be inferred; \
+             declare `[graph] roots`"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(inferred))
+}
+
+/// The root search the depth check reports from.
+struct DepthView {
+    search: RootSearch,
 }
 
 /// One evaluated package, with the rule that reports on it.
@@ -90,6 +162,69 @@ impl NodeReport<'_> {
         }
         violations.push(Violation::new(self.rule, message, details));
     }
+}
+
+/// Evaluate the `depth` range for one package.
+fn check_depth(
+    depth_view: &DepthView,
+    range: &Range,
+    node: &NodeReport,
+    violations: &mut Vec<Violation>,
+) {
+    let value = depth_view.search.depth(node.package);
+    if range.check(value) {
+        return;
+    }
+    let witness = depth_view.search.path(node.package).map(|path| {
+        path.iter()
+            .enumerate()
+            .map(|(index, name)| format!("{name} ({index})"))
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    });
+    node.fail(
+        format!("depth of package `{}` is out of range", node.package),
+        match value {
+            Some(depth) => format!("depth {depth}"),
+            None => "unreachable".to_owned(),
+        },
+        range.render(),
+        witness,
+        violations,
+    );
+}
+
+/// Which adjacency a degree check counts.
+#[derive(Debug, Clone, Copy)]
+enum CountKind {
+    /// Direct dependencies.
+    Dependencies,
+    /// Direct dependents.
+    Dependents,
+}
+
+/// Evaluate a degree range for one package.
+fn check_count(
+    view: &Graph,
+    kind: CountKind,
+    range: &Range,
+    node: &NodeReport,
+    violations: &mut Vec<Violation>,
+) {
+    let (count, message) = match kind {
+        CountKind::Dependencies => (view.dependencies(node.package).count(), "dependency count"),
+        CountKind::Dependents => (view.dependents(node.package).count(), "dependent count"),
+    };
+    if range.check(Some(count)) {
+        return;
+    }
+    node.fail(
+        format!("{message} of package `{}` is out of range", node.package),
+        format!("{message} {count}"),
+        range.render(),
+        None,
+        violations,
+    );
 }
 
 /// One set check whose selectors are resolved against the view.

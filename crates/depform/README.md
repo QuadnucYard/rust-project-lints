@@ -102,6 +102,34 @@ violation is traceable to a concrete chain.
 `reachable` and `dependencies` are independent: an edge can break both, and
 each violation names its own assertion.
 
+### Depth and degrees
+
+```toml
+[graph]
+roots = ["app", "service"]      # optional
+
+[rules.layering]
+select = "shared-*"
+check.depth.max = 2
+check.dependency-count.max = 8
+check.dependent-count.min = 1
+```
+
+`depth` is the shortest distance from any root, roots sitting at 0. Without
+`[graph] roots`, the roots are the packages that no member depends on; that
+inference only runs when a rule checks `depth`, and a view where every package
+has a dependent is a graph error asking for explicit roots. Declared roots are
+always validated against the graph.
+
+`dependency-count` and `dependent-count` count distinct direct neighbors in the
+view, so a filtered-out kind does not count.
+
+Every metric check is a range: `min`, `max`, `exact`, or `min` and `max`,
+inclusive, with non-negative values. `exact` cannot be combined with the bounds.
+A package no root reaches has no depth: `min` passes it, `max` and `exact` fail
+it, and the detail reads `observed: unreachable`. A depth violation names its
+witness, for example `app (0) -> facade (1) -> core (2)`.
+
 ### Selectors
 
 A selector is a string: a package name, or a pattern where `*` matches any run
